@@ -95,7 +95,7 @@ where
         };
 
         let PolicyLocalSettings { data_prep_threads, output_directory, batch_queue_size } = *settings;
-        let settings = LocalSettings { threads: data_prep_threads, test_set: None, output_directory, batch_queue_size };
+        let settings = LocalSettings { threads: data_prep_threads, test_set: None, output_directory: output_directory.to_string(), batch_queue_size };
 
         let preparer = self.training_preamble(&schedule, &settings, data_loader);
         let test_preparer = None::<PolicyDataPreparer<Inp, T, B>>;

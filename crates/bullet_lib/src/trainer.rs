@@ -221,7 +221,7 @@ pub trait NetworkTrainer {
 
                 if schedule.should_save(superbatch) {
                     let name = format!("{}-{superbatch}", schedule.net_id());
-                    let out_dir = settings.output_directory;
+                    let out_dir = settings.output_directory.clone();
                     let path = format!("{out_dir}/{name}");
                     self.save_to_checkpoint(path.as_str());
 

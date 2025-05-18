@@ -27,6 +27,10 @@ sfbinpack = "0.4.1"
 viriformat = "1.0.0"
 
 [[example]]
+name = "0092r5r"
+path = "../../examples/plenty/0092r5r.rs"
+
+[[example]]
 name = "advanced"
 path = "../../examples/advanced.rs"
 
