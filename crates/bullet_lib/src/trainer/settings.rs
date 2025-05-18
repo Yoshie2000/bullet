@@ -22,7 +22,7 @@ pub struct LocalSettings<'a> {
     /// Path to a test dataset, will calculate vaidation loss over this dataset.
     pub test_set: Option<TestDataset<'a>>,
     /// Directory to write checkpoints to.
-    pub output_directory: &'a str,
+    pub output_directory: String,
     /// Number of batches that the dataloader can prepare and put in a queue before
     /// they are processed in training.
     pub batch_queue_size: usize,
@@ -31,6 +31,6 @@ pub struct LocalSettings<'a> {
 impl LocalSettings<'_> {
     pub fn display(&self) {
         println!("Threads                : {}", ansi(self.threads, 31));
-        println!("Output Path            : {}", ansi(self.output_directory, "32;1"));
+        println!("Output Path            : {}", ansi(self.output_directory.clone(), "32;1"));
     }
 }
