@@ -37,6 +37,10 @@ name = "0102"
 path = "../../examples/plenty/0102.rs"
 
 [[example]]
+name = "threats-kingbuckets"
+path = "../../examples/plenty/threats-kingbuckets.rs"
+
+[[example]]
 name = "pgn-to-viriformat"
 path = "../../examples/plenty/pgn-to-viriformat.rs"
 
