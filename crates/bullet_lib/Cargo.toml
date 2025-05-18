@@ -31,6 +31,10 @@ name = "0092r5r"
 path = "../../examples/plenty/0092r5r.rs"
 
 [[example]]
+name = "threats-kingbuckets"
+path = "../../examples/plenty/threats-kingbuckets.rs"
+
+[[example]]
 name = "advanced"
 path = "../../examples/advanced.rs"
 
