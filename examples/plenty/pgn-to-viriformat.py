@@ -8,7 +8,14 @@ import tarfile
 
 PGN_FOLDER = "/mnt/d/Chess Data/Selfgen/Data/PGNs"
 VIRI_FOLDER = "/mnt/d/Chess Data/Selfgen/Data/Viriformat"
+BF_FOLDER = "/mnt/d/Chess Data/Selfgen/Data/Bulletformat"
 MIN_PGN_ID = 4389
+
+# pgn_ids = list(map(lambda x: int(x.split(".")[0]), os.listdir(PGN_FOLDER)))
+# viri_ids = list(map(lambda x: int(x.split(".")[0]), os.listdir(VIRI_FOLDER)))
+# bf_ids = list(map(lambda x: int(x.split(".")[0]), filter(lambda x: x.endswith(".data"), os.listdir(BF_FOLDER))))
+# print(sorted(set(pgn_ids) - set(viri_ids)))
+# print(sorted(set(bf_ids) - set(viri_ids)))
 
 os.makedirs("./downloads", exist_ok=True)
 
@@ -30,6 +37,8 @@ for filename in os.listdir(PGN_FOLDER):
     if os.path.exists(f"{VIRI_FOLDER}/{testId}.viri"):
         continue
     if int(testId) < MIN_PGN_ID:
+        continue
+    if int(testId) >= 4859 and int(testId) <= 4911: # fischer random
         continue
     
     if (not os.path.exists(f"./downloads/{testId}")):

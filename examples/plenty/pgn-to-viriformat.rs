@@ -1,3 +1,6 @@
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
+use rayon::ThreadPoolBuilder;
 use regex::Regex;
 use std::env;
 use std::io::{BufRead, BufReader, BufWriter};
@@ -6,15 +9,12 @@ use std::{fs, process};
 use viriformat::chess::board::movegen;
 use viriformat::chess::board::{Board, GameOutcome};
 use viriformat::chess::chessmove::Move;
-use viriformat::chess::piece::Colour;
 use viriformat::chess::piece::PieceType;
+use viriformat::chess::piece::{Colour, Piece};
 use viriformat::chess::squareset::SquareSet;
 use viriformat::chess::types::{CheckState, Square};
 use viriformat::chess::CHESS960;
 use viriformat::dataformat::Game;
-use rayon::iter::IntoParallelRefIterator;
-use rayon::iter::ParallelIterator;
-use rayon::ThreadPoolBuilder;
 
 pub fn san(board: &mut Board, m: Move) -> Option<String> {
     let check_char = match board.gives(m) {
@@ -93,6 +93,76 @@ pub fn san(board: &mut Board, m: Move) -> Option<String> {
     Some(san)
 }
 
+// pub fn convert_castling(board: &mut Board, fen: &str) -> String {
+//     let fen_chars = fen.as_bytes();
+//     let split_idx =
+//         fen_chars.iter().position(|&c| c == b' ').unwrap();
+//     let (_, info_part) = fen_chars.split_at(split_idx);
+//     let mut info_parts = info_part[1..].split(|&c| c == b' ');
+
+//     let _ = info_parts.next();
+//     let castling_part = info_parts.next();
+
+//     let mut correct_castling_parts = Vec::<u8>::new();
+
+//     match castling_part {
+//         None => panic!(),
+//         Some(b"-") => {},
+//         Some(castling) if CHESS960.load(std::sync::atomic::Ordering::SeqCst) => {
+//             for &c in castling {
+//                 let flag = match c {
+//                     b'K' => {
+//                         let rook_square = (0..8).filter(|sq| {
+//                             board.piece_array[*sq as usize].unwrap_or_else(|| Piece::WP).piece_type() == PieceType::Rook
+//                                 && board.piece_array[*sq as usize].unwrap_or_else(|| Piece::WP).colour() == Colour::White
+//                         }).max().map(|sq| Square::new(sq as u8).unwrap()).take().unwrap();
+//                         b'H' - (7 - rook_square.inner())
+//                     }
+//                     b'Q' => {
+//                         let rook_square = (0..8).filter(|sq| {
+//                             board.piece_array[*sq as usize].unwrap_or_else(|| Piece::WP).piece_type() == PieceType::Rook
+//                                 && board.piece_array[*sq as usize].unwrap_or_else(|| Piece::WP).colour() == Colour::White
+//                         }).min().map(|sq| Square::new(sq as u8).unwrap()).take().unwrap();
+//                         b'A' + rook_square.inner()
+//                     },
+//                     b'k' => {
+//                         let rook_square = (56..64).filter(|sq| {
+//                             board.piece_array[*sq as usize].unwrap_or_else(|| Piece::WP).piece_type() == PieceType::Rook
+//                                 && board.piece_array[*sq as usize].unwrap_or_else(|| Piece::WP).colour() == Colour::White
+//                         }).max().map(|sq| Square::new(sq as u8).unwrap()).take().unwrap();
+//                         b'h' - (7 - rook_square.inner())
+//                     },
+//                     b'q' => {
+//                         let rook_square = (56..64).filter(|sq| {
+//                             board.piece_array[*sq as usize].unwrap_or_else(|| Piece::WP).piece_type() == PieceType::Rook
+//                                 && board.piece_array[*sq as usize].unwrap_or_else(|| Piece::WP).colour() == Colour::White
+//                         }).min().map(|sq| Square::new(sq as u8).unwrap()).take().unwrap();
+//                         b'a' + rook_square.inner()
+//                     },
+//                     _ => panic!()
+//                 };
+//                 correct_castling_parts.push(flag);
+//             }
+//         }
+//         Some(_shredder_castling) => {}
+//     };
+
+//     let updated_fen = match castling_part {
+//         Some(_) => {
+//             let mut parts: Vec<&str> = fen.splitn(3, ' ').collect();
+//             parts[1] = if correct_castling_parts.is_empty() {
+//                 "-"
+//             } else {
+//                 std::str::from_utf8(&correct_castling_parts).unwrap()
+//             };
+//             format!("{} {} {}", parts[0], parts[1], parts[2])
+//         }
+//         None => panic!(),
+//     };
+    
+//     updated_fen
+// }
+
 fn convert_pgn(pgn_path: &str) {
     let input_file = fs::File::open(pgn_path).unwrap();
     let reader = BufReader::new(input_file);
@@ -151,10 +221,7 @@ fn convert_pgn(pgn_path: &str) {
                     }
 
                     let replaced_token = token.replace("+", "").replace("+", "").replace("#", "").replace("x", "");
-                    current_move = if !token.contains("-")
-                        && !token.contains("=")
-                        && replaced_token.len() == 5
-                    {
+                    current_move = if !token.contains("-") && !token.contains("=") && replaced_token.len() == 5 {
                         // Complete move info is given
                         println!("{token} {replaced_token}");
                         let from = Square::from_str(&replaced_token[1..=2]).unwrap();
