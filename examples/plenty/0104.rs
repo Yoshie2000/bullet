@@ -930,28 +930,19 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
 fn main() {
     // Step 1
     train(
-        "/mnt/d/Chess Data/Selfgen/20ksn-plentyChonker.data",
-        wdl::ConstantWDL { value: 0.15 },
-        lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0103", superbatch: 300 },
+        "/mnt/d/Chess Data/Selfgen/20ksn-plentyThreatsChonker.data",
+        wdl::ConstantWDL { value: 0.5 },
+        lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
+        NetConfig { name: "0104", superbatch: 400 },
         None,
     );
 
     // Step 2
     train(
-        "/mnt/d/Chess Data/Selfgen/5ksn.data",
-        wdl::ConstantWDL { value: 0.3 },
-        lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0103r", superbatch: 300 },
-        Some(NetConfig { name: "0103", superbatch: 300 }),
-    );
-
-    // Step 3
-    train(
         "/mnt/d/Chess Data/Selfgen/20ksn.data",
         wdl::ConstantWDL { value: 0.6 },
-        lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0103rr", superbatch: 400 },
-        Some(NetConfig { name: "0103r", superbatch: 300 }),
+        lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 600 },
+        NetConfig { name: "0104r", superbatch: 600 },
+        Some(NetConfig { name: "0104", superbatch: 400 }),
     );
 }
