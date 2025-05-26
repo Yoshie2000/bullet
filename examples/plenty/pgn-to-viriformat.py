@@ -9,7 +9,7 @@ import tarfile
 PGN_FOLDER = "/mnt/d/Chess Data/Selfgen/Data/PGNs"
 VIRI_FOLDER = "/mnt/d/Chess Data/Selfgen/Data/Viriformat"
 BF_FOLDER = "/mnt/d/Chess Data/Selfgen/Data/Bulletformat"
-MIN_PGN_ID = 4389
+MIN_PGN_ID = 6000 # 4389
 
 # pgn_ids = list(map(lambda x: int(x.split(".")[0]), os.listdir(PGN_FOLDER)))
 # viri_ids = list(map(lambda x: int(x.split(".")[0]), os.listdir(VIRI_FOLDER)))

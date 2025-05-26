@@ -252,7 +252,7 @@ fn convert_pgn(pgn_path: &str) {
                     // Parse the evaluation
                     let mut eval_str = token.split_whitespace().next().unwrap_or("").to_string();
                     if !eval_str.contains('M') {
-                        eval_str.retain(|c| c != '.');
+                        eval_str.retain(|c| c != '.' && c != '{');
                         current_eval = eval_str.parse().unwrap_or(0);
                         if current_board.turn() == Colour::Black {
                             current_eval = -current_eval;
@@ -273,7 +273,9 @@ fn convert_pgn(pgn_path: &str) {
                 is_move = !is_move;
             }
 
-            let _ = game.serialise_into(&mut writer).unwrap();
+            if game.len() >= 10 && game.len() <= 250 {
+                let _ = game.serialise_into(&mut writer).unwrap();
+            }
         }
 
         if line.is_empty() {
