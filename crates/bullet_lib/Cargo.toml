@@ -49,8 +49,12 @@ name = "0102rr4"
 path = "../../examples/plenty/0102rr4.rs"
 
 [[example]]
-name = "0102rr5"
-path = "../../examples/plenty/0102rr5.rs"
+name = "0105"
+path = "../../examples/plenty/0105.rs"
+
+[[example]]
+name = "0105rr2r"
+path = "../../examples/plenty/0105rr2r.rs"
 
 [[example]]
 name = "0104"

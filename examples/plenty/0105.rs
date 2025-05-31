@@ -1,18 +1,18 @@
 use bullet_core::optimiser::adam::AdamW;
 use bullet_lib::{
     default::{
-        inputs,
+        inputs::{self, SparseInputType},
         loader::{DataLoader, DirectSequentialDataLoader},
         outputs::{self, MaterialCount},
         Loss, Trainer, TrainerBuilder,
     },
-    game::inputs::ChessBucketsMirroredFactorised,
+    game::inputs::ChessBucketsMirrored,
     lr::{self, LrScheduler},
-    nn::optimiser,
-    trainer::NetworkTrainer,
-    value::{loader::ViriBinpackLoader, ValueTrainerBuilder},
+    nn::{optimiser, InitSettings},
+    trainer::{save::SavedFormat, NetworkTrainer},
+    value::{loader::ViriBinpackLoader, NoOutputBuckets, ValueTrainerBuilder},
     wdl::{self, WdlScheduler},
-    Activation, ExecutionContext, LocalSettings, TrainingSchedule, TrainingSteps,
+    Activation, ExecutionContext, LocalSettings, Shape, TrainingSchedule, TrainingSteps,
 };
 use bulletformat::ChessBoard;
 use viriformat::dataformat::Filter;
@@ -22,22 +22,31 @@ struct NetConfig<'a> {
     superbatch: usize,
 }
 
-fn make_trainer() -> Trainer<AdamW<ExecutionContext>, ChessBucketsMirroredFactorised, NoOutputBuckets> {
+fn make_trainer() -> Trainer<AdamW<ExecutionContext>, ChessBucketsMirrored, MaterialCount<8>> {
+    #[rustfmt::skip]
+    let inputs = inputs::ChessBucketsMirrored::new([
+        00, 01, 02, 03,
+        04, 05, 06, 07,
+        08, 08, 09, 09,
+        10, 10, 10, 10,
+        11, 11, 11, 11,
+        11, 11, 11, 11,
+        11, 11, 11, 11,
+        11, 11, 11, 11,
+    ]);
+    const KING_BUCKETS: usize = 12;
+    const OUTPUT_BUCKETS: usize = 8;
+    const L1_SIZE: usize = 1792;
+    const L2_SIZE: usize = 16;
+    const L3_SIZE: usize = 32;
+
     #[rustfmt::skip]
     return ValueTrainerBuilder::default()
         .dual_perspective()
         .optimiser(optimiser::AdamW)
         .loss_fn(|output, targets| output.sigmoid().squared_error(targets))
-        .inputs(inputs::ChessBucketsMirroredFactorised::new([
-            00, 01, 02, 03,
-            04, 05, 06, 07,
-            08, 08, 09, 09,
-            10, 10, 10, 10,
-            11, 11, 11, 11,
-            11, 11, 11, 11,
-            11, 11, 11, 11,
-            11, 11, 11, 11,
-        ]))
+        .inputs(inputs)
+        .output_buckets(MaterialCount::<OUTPUT_BUCKETS>)
         .save_format(&[
             SavedFormat::id("l0f"),
             SavedFormat::id("l0w"),
@@ -49,13 +58,8 @@ fn make_trainer() -> Trainer<AdamW<ExecutionContext>, ChessBucketsMirroredFactor
             SavedFormat::id("l3w"),
             SavedFormat::id("l3b"),
         ])
-        .build(|builder, stm, ntm| {
-            const KING_BUCKETS: usize = 12;
-            const OUTPUT_BUCKETS: usize = 1;
-            const L1_SIZE: usize = 1792;
-            const L2_SIZE: usize = 16;
-            const L3_SIZE: usize = 32;
-
+        .build(|builder, stm, ntm, buckets| {
+            // Build fast factoriser
             let mut l0 = builder.new_affine("l0", 768 * KING_BUCKETS, L1_SIZE);
 
             let l0f = builder.new_weights("l0f", Shape::new(768 * L1_SIZE, 1), InitSettings::Zeroed);
@@ -63,8 +67,9 @@ fn make_trainer() -> Trainer<AdamW<ExecutionContext>, ChessBucketsMirroredFactor
             let expanded = l0f.matmul(ones).reshape(Shape::new(L1_SIZE, inputs.num_inputs()));
             l0.weights = l0.weights + expanded;
 
+            // Build layers
             let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
-            let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L1_SIZE);
+            let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE, OUTPUT_BUCKETS);
 
             // Crelu + Pairwise
@@ -72,16 +77,15 @@ fn make_trainer() -> Trainer<AdamW<ExecutionContext>, ChessBucketsMirroredFactor
             let ntm_subnet = l0.forward(ntm).crelu().pairwise_mul();
             let out = stm_subnet.concat(ntm_subnet);
             // Dual activation
-            let out = l1.forward(out); // TODO output buckets
+            let out = l1.forward(out).select(buckets);
             let out = out.concat(out.abs_pow(2.0));
             let out = out.crelu();
             // L2 + L3 forward
-            let out = l2.forward(out).screlu(); // TODO output buckets
-            let out = l3.forward(out); // TODO output buckets
+            let out = l2.forward(out).select(buckets).screlu();
+            let out = l3.forward(out).select(buckets);
 
             out
         });
-    );
 }
 
 fn make_settings(experiment_name: &str) -> LocalSettings {
@@ -114,7 +118,7 @@ fn train<WDL: WdlScheduler, LR: LrScheduler, DL: DataLoader<ChessBoard>>(
 
     let schedule = TrainingSchedule {
         net_id: format!("net-{}", net.name).to_string(),
-        eval_scale: 450.0f,
+        eval_scale: 450.0,
         steps: TrainingSteps {
             batch_size: 16_384,
             batches_per_superbatch: 6104,
@@ -139,29 +143,54 @@ fn train<WDL: WdlScheduler, LR: LrScheduler, DL: DataLoader<ChessBoard>>(
 }
 
 fn main() {
-    // Step 4
+    // ViriBinpackLoader::new(
+    //     "/mnt/d/Chess Data/Selfgen/20ksn.viri",
+    //     4096,
+    //     4,
+    //     Filter {
+    //         min_ply: 24,
+    //         min_pieces: 3,
+    //         max_eval: 32000,
+    //         filter_tactical: true,
+    //         filter_check: true,
+    //         filter_castling: false,
+
+    //         // Disabled / default
+    //         max_eval_incorrectness: u32::MAX,
+    //         normalise_to_pawn_value: 280,
+    //         random_fen_skip_probability: 0.0,
+    //         wld_filtered: false,
+    //         random_fen_skipping: false,
+    //         wdl_heuristic_scale: 1.5,
+    //         wdl_model_params_a: [6.871_558_62, -39.652_263_91, 90.684_603_52, 170.669_963_64],
+    //         wdl_model_params_b: [-7.198_907_10, 56.139_471_85, -139.910_911_83, 182.810_074_27],
+    //     },
+    // ),
+
+    // Step 1
     train(
-        ViriBinpackLoader::new(
-            "/mnt/d/Chess Data/Selfgen/20ksn.viri",
-            4096,
-            4,
-            Filter {
-                min_ply: 24,
-                min_pieces: 3,
-                max_eval: 32000,
-                filter_tactical: true,
-                filter_check: true,
-                filter_castling: false,
-                max_eval_incorrectness: u32::MAX,
-            },
-        ),
+        DirectSequentialDataLoader::new(&["/mnt/d/Chess Data/Selfgen/5ksn.data"]),
+        wdl::LinearWDL { start: 0.2, end: 0.35 },
+        lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
+        NetConfig { name: "0105", superbatch: 300 },
+        None,
+    );
+
+    // Step 2
+    train(
+        DirectSequentialDataLoader::new(&["/mnt/d/Chess Data/Selfgen/20ksn.data"]),
+        wdl::ConstantWDL { value: 0.5 },
+        lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
+        NetConfig { name: "0105r", superbatch: 300 },
+        Some(NetConfig { name: "0105", superbatch: 300 }),
+    );
+
+    // Step 3
+    train(
+        DirectSequentialDataLoader::new(&["/mnt/d/Chess Data/Selfgen/20ksn.data"]),
         wdl::ConstantWDL { value: 0.6 },
-        lr::CosineDecayLR {
-            initial_lr: 0.00025 * 0.3,
-            final_lr: 0.00025 * 0.3 * 0.3 * 0.3 * 0.3,
-            final_superbatch: 200,
-        },
-        NetConfig { name: "0102rr4", superbatch: 200 },
-        Some(NetConfig { name: "0102rr", superbatch: 400 }),
+        lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
+        NetConfig { name: "0105rr", superbatch: 400 },
+        Some(NetConfig { name: "0105r", superbatch: 300 }),
     );
 }
