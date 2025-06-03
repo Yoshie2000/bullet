@@ -53,6 +53,10 @@ name = "0102rr5"
 path = "../../examples/plenty/0102rr5.rs"
 
 [[example]]
+name = "0104"
+path = "../../examples/plenty/0104.rs"
+
+[[example]]
 name = "0105"
 path = "../../examples/plenty/0105.rs"
 
@@ -65,8 +69,8 @@ name = "0105rr2r2"
 path = "../../examples/plenty/0105rr2r2.rs"
 
 [[example]]
-name = "0104"
-path = "../../examples/plenty/0104.rs"
+name = "0106"
+path = "../../examples/plenty/0106.rs"
 
 [[example]]
 name = "threats-kingbuckets"
