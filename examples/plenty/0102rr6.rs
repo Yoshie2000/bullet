@@ -135,6 +135,6 @@ fn main() {
         wdl::ConstantWDL { value: 0.6 },
         lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
         NetConfig { name: "0102rr6", superbatch: 400 },
-        Some(NetConfig { name: "0102rr6", superbatch: 280 }),
+        Some(NetConfig { name: "0102r", superbatch: 300 }),
     );
 }
