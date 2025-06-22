@@ -84,6 +84,30 @@ name = "0107"
 path = "../../examples/plenty/0107.rs"
 
 [[example]]
+name = "0107rr2"
+path = "../../examples/plenty/0107rr2.rs"
+
+[[example]]
+name = "0107rr3"
+path = "../../examples/plenty/0107rr3.rs"
+
+[[example]]
+name = "0107rr3r"
+path = "../../examples/plenty/0107rr3r.rs"
+
+[[example]]
+name = "0107rr3r2"
+path = "../../examples/plenty/0107rr3r2.rs"
+
+[[example]]
+name = "0107rr3r3"
+path = "../../examples/plenty/0107rr3r3.rs"
+
+[[example]]
+name = "0107rr3r4"
+path = "../../examples/plenty/0107rr3r4.rs"
+
+[[example]]
 name = "threats-kingbuckets"
 path = "../../examples/plenty/threats-kingbuckets.rs"
 
