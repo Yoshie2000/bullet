@@ -11,11 +11,11 @@ use bullet_lib::{
 
 fn main() {
     // hyperparams to fiddle with
-    let hl_size = 256;
+    let hl_size = 128;
     let dataset_path = "data/baseline.data";
     let initial_lr = 0.001;
     let final_lr = 0.001 * 0.3f32.powi(5);
-    let superbatches = 160;
+    let superbatches = 40;
     let wdl_proportion = 0.75;
 
     let mut trainer = ValueTrainerBuilder::default()
@@ -26,7 +26,7 @@ fn main() {
             SavedFormat::id("l0w").quantise::<i16>(255),
             SavedFormat::id("l0b").quantise::<i16>(255),
             SavedFormat::id("l1w").quantise::<i16>(64),
-            SavedFormat::id("l1b").quantise::<i16>(64),
+            SavedFormat::id("l1b").quantise::<i16>(255 * 64),
         ])
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(|builder, stm_inputs, ntm_inputs| {
