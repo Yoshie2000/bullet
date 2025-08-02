@@ -112,6 +112,38 @@ name = "0107rr3r5"
 path = "../../examples/plenty/0107rr3r5.rs"
 
 [[example]]
+name = "0107rr3r6"
+path = "../../examples/plenty/0107rr3r6.rs"
+
+[[example]]
+name = "0107rr3r7"
+path = "../../examples/plenty/0107rr3r7.rs"
+
+[[example]]
+name = "0107rr3r8"
+path = "../../examples/plenty/0107rr3r8.rs"
+
+[[example]]
+name = "0107rr3r9"
+path = "../../examples/plenty/0107rr3r9.rs"
+
+[[example]]
+name = "0107rr3r10"
+path = "../../examples/plenty/0107rr3r10.rs"
+
+[[example]]
+name = "0107rr3r11"
+path = "../../examples/plenty/0107rr3r11.rs"
+
+[[example]]
+name = "0107rr3r12"
+path = "../../examples/plenty/0107rr3r12.rs"
+
+[[example]]
+name = "0107rr3r13"
+path = "../../examples/plenty/0107rr3r13.rs"
+
+[[example]]
 name = "0108"
 path = "../../examples/plenty/0108.rs"
 

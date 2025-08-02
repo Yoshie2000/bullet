@@ -11,7 +11,7 @@ use bullet_lib::{
     Shape,
     game::inputs::ChessBucketsMirrored,
     lr::{self, LrScheduler},
-    nn::{optimiser, InitSettings},
+    nn::{optimiser::{self, AdamWOptimiser}, InitSettings},
     value::{ValueTrainerBuilder, ValueTrainer},
     trainer::{NetworkTrainer, save::SavedFormat},
     wdl::{self, WdlScheduler},
@@ -27,7 +27,7 @@ struct NetConfig<'a> {
 
 const TRAINING_DIR: &str = "/mnt/d/Chess Data/Selfgen/Training";
 
-fn make_trainer() -> ValueTrainer<AdamW<ExecutionContext>, ChessBucketsMirrored, MaterialCount<8>> {
+fn make_trainer() -> ValueTrainer<AdamWOptimiser, ChessBucketsMirrored, MaterialCount<8>> {
     #[rustfmt::skip]
     let inputs = inputs::ChessBucketsMirrored::new([
         00, 01, 02, 03,
@@ -81,28 +81,18 @@ fn make_trainer() -> ValueTrainer<AdamW<ExecutionContext>, ChessBucketsMirrored,
             l0.weights = l0.weights + expanded;
 
             // Build layers
-            let l1 = builder.new_affine("l1", L1_SIZE + 56, OUTPUT_BUCKETS * L2_SIZE);
+            let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE, OUTPUT_BUCKETS);
 
-            // Crelu + Pairwise + Cross-Side-Dotprod
+            // Crelu + Pairwise
             let stm_subnet = l0.forward(stm).crelu().pairwise_mul();
             let ntm_subnet = l0.forward(ntm).crelu().pairwise_mul();
-
-            let ones = builder.new_constant(Shape::new(1, 16), &[1.0; 16]);
-            let stm_subnet_16 = stm_subnet.reshape(Shape::new(16, 56));
-            let stm_sums = ones.matmul(stm_subnet_16).reshape(Shape::new(56, 1));
-            let ntm_subnet_16 = ntm_subnet.reshape(Shape::new(16, 56));
-            let ntm_sums = ones.matmul(ntm_subnet_16).reshape(Shape::new(56, 1));
-            let element_wise_mul = stm_sums * ntm_sums;
-
-            let out = stm_subnet.concat(ntm_subnet).concat(element_wise_mul);
-
+            let out = stm_subnet.concat(ntm_subnet);
             // Dual activation
             let out = l1.forward(out).select(buckets);
             let out = out.concat(out.abs_pow(2.0));
             let out = out.crelu();
-
             // L2 + L3 forward
             let out = l2.forward(out).select(buckets).screlu();
             let out = l3.forward(out).select(buckets);
@@ -131,7 +121,8 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
 
     if let Some(load_from_net) = load_from.clone() {
         if load_from_net.name != net.name {
-            let _ = trainer.optimiser
+            let _ = trainer
+                .optimiser
                 .load_weights_from_file(
                     format!(
                         "/mnt/d/Chess Data/Selfgen/Training/{}/net-{}-{}/optimiser_state/weights.bin",
@@ -185,30 +176,12 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
 }
 
 fn main() {
-    // Step 1
+    // Step 4
     train(
-        "/mnt/d/Chess Data/Selfgen/20ksn-plentyChonker.data",
-        wdl::ConstantWDL { value: 0.15 },
-        lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0108", superbatch: 300 },
-        None,
-    );
-
-    // Step 2
-    train(
-        "/mnt/d/Chess Data/Selfgen/5ksn.data",
-        wdl::ConstantWDL { value: 0.3 },
-        lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0108r", superbatch: 300 },
-        Some(NetConfig { name: "0108", superbatch: 300 }),
-    );
-
-    // Step 3
-    train(
-        "/mnt/d/Chess Data/Selfgen/20ksn.data",
-        wdl::ConstantWDL { value: 0.6 },
-        lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0108rr", superbatch: 400 },
-        Some(NetConfig { name: "0108r", superbatch: 300 }),
+        "/mnt/d/Chess Data/Selfgen/20ksn-tb.data",
+        wdl::ConstantWDL { value: 1.0 },
+        lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
+        NetConfig { name: "0107rr3r6", superbatch: 300 },
+        Some(NetConfig { name: "0107rr3", superbatch: 400 }),
     );
 }
