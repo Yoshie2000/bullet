@@ -1,18 +1,19 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    backend::{
-        device::{Device, OperationError},
+    device::{Device, OperationError},
+    graph::{
+        builder::Shape,
         tensor::{DenseMatrix, Matrix, SparseMatrix},
+        Graph, NodeId, NodeIdTy,
     },
-    graph::{builder::Shape, Graph},
     trainer::TrainerError,
 };
 
 pub trait DataLoader: Send + Sync + 'static {
     type Error: Send + Sync;
 
-    fn map_batches<F: FnMut(PreparedBatchHost) -> bool>(self, f: F) -> Result<(), Self::Error>;
+    fn map_batches<F: FnMut(PreparedBatchHost) -> bool>(self, batch_size: usize, f: F) -> Result<(), Self::Error>;
 }
 
 pub struct PreparedBatchHost {
@@ -139,8 +140,10 @@ impl<D: Device> PreparedBatchDevice<D> {
         for (id, matrix) in &mut self.inputs {
             assert_eq!(batch_size, matrix.batch_size().unwrap_or(1));
 
-            if graph.has_input(id) {
-                matrix.swap_with(&mut graph.get_input_mut(id).values).map_err(TrainerError::Unexpected)?;
+            if let Some(idx) = graph.input_idx(id) {
+                matrix
+                    .swap_with(&mut graph.get_mut(NodeId::new(idx, NodeIdTy::Values)).unwrap().values)
+                    .map_err(TrainerError::Unexpected)?;
             }
         }
 
