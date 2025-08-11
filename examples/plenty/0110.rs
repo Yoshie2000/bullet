@@ -15,7 +15,7 @@ use bullet_lib::{
 };
 use rand::Rng;
 
-pub mod argmax {
+pub mod topk_softmax {
     use bullet_core::{
         device::OperationError,
         graph::{
@@ -32,11 +32,11 @@ pub mod argmax {
     use bullet_cuda_backend::{cudarc::driver::{LaunchConfig, PushKernelArg}, CudaDevice, CudaError, CudaMarker};
 
     #[derive(Debug)]
-    pub struct ArgMax {
+    pub struct TopKSoftMax {
         pub input: AnnotatedNode,
     }
 
-    impl<B: BackendMarker> GraphIROperation<B> for ArgMax {
+    impl<B: BackendMarker> GraphIROperation<B> for TopKSoftMax {
         fn nodes(&self) -> Vec<AnnotatedNode> {
             vec![self.input]
         }
@@ -48,7 +48,7 @@ pub mod argmax {
         }
     }
 
-    impl GraphIROperationCompilable<CudaMarker> for ArgMax {
+    impl GraphIROperationCompilable<CudaMarker> for TopKSoftMax {
         fn forward_pass(&self, _: &GraphIRNodeInfo, output_node: usize) -> GraphFunction<CudaDevice> {
             let input = NodeId::new(self.input.idx, NodeIdTy::Values);
             let output = NodeId::new(output_node, NodeIdTy::Values);
@@ -56,7 +56,7 @@ pub mod argmax {
             let mut func = GraphFunction::default();
 
             func.push(MaybeUpdateBatchSize { input, output });
-            func.push(ArgMaxFwd { input, output });
+            func.push(TopKSoftMaxFwd { input, output });
 
             func
         }
@@ -75,12 +75,12 @@ pub mod argmax {
     }
 
     #[derive(Debug)]
-    struct ArgMaxFwd {
+    struct TopKSoftMaxFwd {
         input: NodeId,
         output: NodeId,
     }
 
-    impl GraphInstruction<CudaDevice> for ArgMaxFwd {
+    impl GraphInstruction<CudaDevice> for TopKSoftMaxFwd {
         fn execute(&self, graph: &Graph<CudaDevice>) -> Result<(), OperationError<CudaError>> {
             let input = graph.get(self.input)?;
             let input = input.dense()?;
@@ -99,7 +99,7 @@ pub mod argmax {
             let device = input.buf.device.clone();
 
             unsafe {
-                let func = device.get_custom_func_or_rtc("ArgMaxKernel", || include_str!("argmax.cu").to_string())?;
+                let func = device.get_custom_func_or_rtc("TopKSoftMaxKernel", || include_str!("topk_softmax.cu").to_string())?;
 
                 let batch_size = input.batch_size().unwrap_or(1);
                 let single_size = input.single_size();
@@ -200,7 +200,7 @@ fn make_trainer() -> ValueTrainer<AdamW<ExecutionContext>, ChessBucketsMirrored,
             let l1_out = l1_out.crelu();
 
             // Output bucket router
-            let router_bucket = builder.apply(argmax::ArgMax { input: router.forward(l1_out).annotated_node() });
+            let router_bucket = builder.apply(topk_softmax::TopKSoftMax { input: router.forward(l1_out).annotated_node() });
 
             // L2 + L3 forward
             let l2_out = l2.forward(l1_out).reshape(Shape::new(L3_SIZE, OUTPUT_BUCKETS)).matmul(router_bucket).screlu();
