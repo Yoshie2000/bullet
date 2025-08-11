@@ -112,7 +112,7 @@ where
             dataloader.clone(),
         );
 
-        let _ = std::fs::create_dir(settings.output_directory);
+        let _ = std::fs::create_dir(settings.output_directory.clone());
 
         let lr_scheduler = schedule.lr_scheduler.clone();
 
