@@ -2,131 +2,104 @@ pub mod compile;
 pub mod node;
 pub mod operation;
 pub mod passes;
-pub mod properties;
 pub mod shape;
-pub mod transform;
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt::{self, Debug},
+    marker::PhantomData,
     num::NonZeroUsize,
-    sync::atomic::{AtomicUsize, Ordering},
+    ops::{Deref, DerefMut},
+    rc::Rc,
 };
 
-use node::{AnnotatedNode, GraphIRNode, NodeInfo};
+use acyclib::{
+    graph::{DAGraph, DAGraphError, Node, NodeId, Operation, format::StringOperation},
+    manager::{DAGraphManager, DAGraphManagerError, DAGraphType},
+};
+use node::{AnnotatedNode, NodeInfo};
 use operation::*;
 use shape::Shape;
 
 use crate::device::Device;
 
-pub trait BackendMarker: Copy + Default + 'static {
+pub trait BackendMarker: Copy + Debug + Default + 'static {
     type Backend: Device;
 }
 
-#[derive(Debug, Default)]
-pub struct GraphIRCompileOptions {
-    pub dump_graphviz: Option<String>,
-}
-
 #[derive(Default)]
-pub struct GraphIR<B: BackendMarker> {
-    nodes: HashMap<usize, GraphIRNode<B>>,
-    counter: AtomicUsize,
-    leafs: HashSet<usize>,
-    inputs: HashSet<usize>,
-    weights: HashSet<usize>,
-    ids: HashSet<String>,
-    opts: GraphIRCompileOptions,
+pub struct GraphIRManager<B: BackendMarker> {
+    inner: DAGraphManager<GraphIRType<B>>,
+    inputs: HashSet<NodeId>,
+    weights: HashSet<NodeId>,
+    ids: HashMap<NodeId, String>,
 }
 
-pub struct GraphIRNodeInfo {
-    nodes: HashMap<usize, NodeInfo>,
-}
-
-impl GraphIRNodeInfo {
-    pub fn get(&self, node: usize) -> Option<NodeInfo> {
-        self.nodes.get(&node).copied()
-    }
-}
-
-#[derive(Debug)]
-pub enum GraphIRError {
-    Op(GraphIROperationError),
-    MultipleRoots,
-    InvalidRootNode,
-    FailedToInitTensor,
-    UnsupportedOperation(String),
-    CannotBeTopologicallyOrdered,
-    NodeAlreadyExists,
-    NodeWithIdAlreadyExists(String),
-    NodeDataDoesNotMatchExpected,
-    NodeDoesNotExist,
-    NodeHasInvalidNumberOfChildren,
-}
-
-impl From<GraphIROperationError> for GraphIRError {
-    fn from(value: GraphIROperationError) -> Self {
-        Self::Op(value)
-    }
-}
-
-impl<B: BackendMarker> GraphIR<B> {
-    pub fn get(&self, idx: usize) -> Result<&GraphIRNode<B>, GraphIRError> {
-        self.nodes.get(&idx).ok_or(GraphIRError::NodeDoesNotExist)
+impl<B: BackendMarker> GraphIRManager<B> {
+    pub fn get_id(&self, id: NodeId) -> Option<String> {
+        self.ids.get(&id).cloned()
     }
 
-    pub fn get_mut(&mut self, idx: usize) -> Result<&mut GraphIRNode<B>, GraphIRError> {
-        self.nodes.get_mut(&idx).ok_or(GraphIRError::NodeDoesNotExist)
+    pub fn get(&self, id: NodeId) -> GraphIRResult<&Node<NodeInfo, GraphIROperation<B>>, B> {
+        self.inner.get(id)
     }
 
-    pub fn new_idx(&self) -> usize {
-        self.counter.fetch_add(1, Ordering::SeqCst)
+    pub fn modify<T>(&mut self, f: impl FnOnce(&mut GraphIR<B>) -> Result<T, DAGraphError>) -> GraphIRResult<T, B> {
+        self.inner.modify(f)
     }
 
-    pub fn add_node(
+    pub fn root(&self) -> GraphIRResult<AnnotatedNode, B> {
+        let roots = self.inner.roots();
+
+        if roots.len() != 1 {
+            return self.inner.capture_error(Err(GraphIRError::MultipleRoots.into()));
+        }
+
+        let idx = *roots.iter().next().unwrap();
+        let shape = self.get(idx)?.ty().shape;
+
+        Ok(AnnotatedNode { idx, shape })
+    }
+
+    pub fn formatted(&self) -> Result<DAGraph<String, StringOperation>, DAGraphError> {
+        self.inner.formatted()
+    }
+
+    pub fn add_leaf(
         &mut self,
         id: Option<String>,
-        parent_operation: Option<Box<dyn GraphIROperationCompilable<B>>>,
         shape: Shape,
         batched: bool,
         requires_grad: bool,
         sparse: Option<NonZeroUsize>,
-    ) -> Result<AnnotatedNode, GraphIRError> {
-        if let Some(id) = id.as_ref() {
-            if self.ids.contains(id) {
-                return Err(GraphIRError::NodeWithIdAlreadyExists(id.clone()));
-            }
+    ) -> Result<AnnotatedNode, DAGraphManagerError<GraphIRType<B>>> {
+        let ty = NodeInfo { shape, batched, requires_grad, sparse };
+        let node = self.add_op(GraphIRLeaf { id: id.clone(), ty })?;
 
-            self.ids.insert(id.to_string());
+        if let Some(id) = id {
+            if self.ids.insert(node.idx, id.clone()).is_some() {
+                let err = Err(GraphIRError::NodeWithIdAlreadyExists(id));
+                return self.inner.capture_error(err.map_err(Into::into))?;
+            }
         }
 
-        let idx = self.new_idx();
-        let annotated = AnnotatedNode { idx, shape };
-
-        self.insert_node(GraphIRNode {
-            id,
-            parent_operation,
-            info: NodeInfo { shape, requires_grad, batched, sparse },
-            idx,
-            num_children: 0,
-        })?;
-
-        Ok(annotated)
-    }
-
-    pub fn add_constant(&mut self, shape: Shape) -> Result<AnnotatedNode, GraphIRError> {
-        let node = self.add_node(None, None, shape, false, false, None)?;
         Ok(node)
     }
 
-    pub fn add_dense_input(&mut self, id: &str, shape: Shape) -> Result<AnnotatedNode, GraphIRError> {
-        let node = self.add_node(Some(id.to_string()), None, shape, true, false, None)?;
+    pub fn add_constant(&mut self, shape: Shape) -> GraphIRResult<AnnotatedNode, B> {
+        let node = self.add_leaf(None, shape, false, false, None)?;
+        Ok(node)
+    }
+
+    pub fn add_dense_input(&mut self, id: &str, shape: Shape) -> GraphIRResult<AnnotatedNode, B> {
+        let node = self.add_leaf(Some(id.to_string()), shape, true, false, None)?;
         self.inputs.insert(node.idx);
         Ok(node)
     }
 
-    pub fn add_sparse_input(&mut self, id: &str, shape: Shape, nnz: usize) -> Result<AnnotatedNode, GraphIRError> {
+    pub fn add_sparse_input(&mut self, id: &str, shape: Shape, nnz: usize) -> GraphIRResult<AnnotatedNode, B> {
         let nnz = NonZeroUsize::try_from(nnz).unwrap();
-        let node = self.add_node(Some(id.to_string()), None, shape, true, false, Some(nnz))?;
+        let node = self.add_leaf(Some(id.to_string()), shape, true, false, Some(nnz))?;
         self.inputs.insert(node.idx);
         Ok(node)
     }
@@ -136,28 +109,24 @@ impl<B: BackendMarker> GraphIR<B> {
         id: &str,
         shape: Shape,
         sparse: Option<usize>,
-    ) -> Result<AnnotatedNode, GraphIRError> {
+    ) -> GraphIRResult<AnnotatedNode, B> {
         let sparse = sparse.map(|nnz| NonZeroUsize::try_from(nnz).unwrap());
-        let node = self.add_node(Some(id.to_string()), None, shape, false, false, sparse)?;
+        let node = self.add_leaf(Some(id.to_string()), shape, false, false, sparse)?;
         self.inputs.insert(node.idx);
         Ok(node)
     }
 
-    pub fn add_weights(&mut self, id: &str, shape: Shape) -> Result<AnnotatedNode, GraphIRError> {
-        let node = self.add_node(Some(id.to_string()), None, shape, false, true, None)?;
+    pub fn add_weights(&mut self, id: &str, shape: Shape) -> GraphIRResult<AnnotatedNode, B> {
+        let node = self.add_leaf(Some(id.to_string()), shape, false, true, None)?;
         self.weights.insert(node.idx);
         Ok(node)
     }
 
-    pub fn add_op(&mut self, operation: impl GraphIROperationCompilable<B>) -> Result<AnnotatedNode, GraphIRError> {
-        let shape = operation.output_shape(self)?;
-        let batched = operation.output_batched(self)?;
-        let requires_grad = operation.output_requires_grad(self)?;
-        self.add_node(None, Some(Box::new(operation)), shape, batched, requires_grad, None)
-    }
-
-    pub fn set_compile_opts(&mut self, opts: GraphIRCompileOptions) {
-        self.opts = opts;
+    pub fn add_op(&mut self, operation: impl GraphIROperationCompilable<B>) -> GraphIRResult<AnnotatedNode, B> {
+        let op: Rc<dyn GraphIROperationCompilable<B>> = Rc::new(operation);
+        let idx = self.inner.add_node(op)?;
+        let shape = self.inner.get(idx)?.ty().shape;
+        Ok(AnnotatedNode { idx, shape })
     }
 
     pub fn as_graphviz(&self, prefix: &str) -> Result<String, std::fmt::Error> {
@@ -165,22 +134,126 @@ impl<B: BackendMarker> GraphIR<B> {
 
         let mut s = String::new();
 
-        for node in self.topo_order().unwrap() {
-            if let Ok(data) = self.get(node) {
-                if let Some(op) = &data.parent_operation {
-                    let opname = op.shorthand();
-                    writeln!(&mut s, "{prefix}{node} [label=\"{opname}\"];")?;
+        for node in self.inner.topo_order().unwrap() {
+            let data = self.get(node).unwrap();
+            let node = node.inner();
+            let op = data.op();
+            let opname = op.shorthand();
+            let parents = op.parents();
 
-                    for parent in op.nodes() {
-                        writeln!(&mut s, "{prefix}{} -> {prefix}{node};", parent.idx)?;
-                    }
-                } else {
-                    let opname = data.id.clone().unwrap_or("__constant".to_string());
-                    writeln!(&mut s, "{prefix}{node} [label=\"{opname}\", style=filled, color=lightblue];")?;
+            if parents.is_empty() {
+                writeln!(&mut s, "{prefix}{node} [label=\"{opname}\", style=filled, color=lightblue];")?;
+            } else {
+                writeln!(&mut s, "{prefix}{node} [label=\"{opname}\"];")?;
+
+                for parent in parents {
+                    writeln!(&mut s, "{prefix}{} -> {prefix}{node:?};", parent.inner())?;
                 }
             }
         }
 
         Ok(s)
+    }
+}
+
+pub type GraphIR<B> = DAGraph<NodeInfo, GraphIROperation<B>>;
+
+pub trait GraphIRMethods<B: BackendMarker> {
+    fn create(&mut self, operation: impl GraphIROperationCompilable<B>) -> Result<AnnotatedNode, DAGraphError>;
+    fn replace(&mut self, node: NodeId, operation: impl GraphIROperationCompilable<B>) -> Result<(), DAGraphError>;
+}
+
+impl<B: BackendMarker> GraphIRMethods<B> for GraphIR<B> {
+    fn create(&mut self, operation: impl GraphIROperationCompilable<B>) -> Result<AnnotatedNode, DAGraphError> {
+        let idx = self.add_node(GraphIROperation(Rc::new(operation)))?;
+        let shape = self.get(idx)?.ty().shape;
+        Ok(AnnotatedNode { idx, shape })
+    }
+
+    fn replace(&mut self, node: NodeId, operation: impl GraphIROperationCompilable<B>) -> Result<(), DAGraphError> {
+        self.replace_op(node, GraphIROperation(Rc::new(operation)))
+    }
+}
+
+#[derive(Clone)]
+pub struct GraphIROperation<B>(Rc<dyn GraphIROperationCompilable<B>>);
+
+impl<B> fmt::Debug for GraphIROperation<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+
+impl<B: BackendMarker> From<Rc<dyn GraphIROperationCompilable<B>>> for GraphIROperation<B> {
+    fn from(value: Rc<dyn GraphIROperationCompilable<B>>) -> Self {
+        Self(value)
+    }
+}
+
+impl<B: BackendMarker> Operation<NodeInfo> for GraphIROperation<B> {
+    fn parents(&self) -> HashSet<NodeId> {
+        self.nodes().iter().map(|x| x.idx).collect()
+    }
+
+    fn out_type(&self, graph: &DAGraph<NodeInfo, Self>) -> Result<NodeInfo, DAGraphError> {
+        let shape = self.output_shape(graph)?;
+        let batched = self.output_batched(graph)?;
+        let requires_grad = self.output_requires_grad(graph)?;
+        let sparse = self.output_layout(graph)?;
+
+        Ok(NodeInfo { requires_grad, sparse, batched, shape })
+    }
+}
+
+impl<B: BackendMarker> Deref for GraphIROperation<B> {
+    type Target = Rc<dyn GraphIROperationCompilable<B>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<B: BackendMarker> DerefMut for GraphIROperation<B> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+pub struct GraphIRType<B>(PhantomData<B>);
+impl<B: BackendMarker> DAGraphType for GraphIRType<B> {
+    type Type = NodeInfo;
+    type Operation = GraphIROperation<B>;
+}
+
+pub type GraphIRResult<T, B> = Result<T, DAGraphManagerError<GraphIRType<B>>>;
+
+#[derive(Debug)]
+pub enum GraphIRError {
+    Op(GraphIROperationError),
+    MultipleRoots,
+    CannotBeTopologicallyOrdered,
+    NodeAlreadyExists,
+    NodeWithIdAlreadyExists(String),
+    NodeDataDoesNotMatchExpected,
+    NodeDoesNotExist,
+    NodeHasInvalidNumberOfChildren,
+    AcyclibGraphError(DAGraphError),
+}
+
+impl From<DAGraphError> for GraphIRError {
+    fn from(value: DAGraphError) -> Self {
+        Self::AcyclibGraphError(value)
+    }
+}
+
+impl From<GraphIROperationError> for GraphIRError {
+    fn from(value: GraphIROperationError) -> Self {
+        Self::Op(value)
+    }
+}
+
+impl From<GraphIRError> for DAGraphError {
+    fn from(value: GraphIRError) -> Self {
+        Self::Message(format!("{value:?}"))
     }
 }

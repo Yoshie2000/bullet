@@ -1,14 +1,15 @@
+use acyclib::graph::NodeId;
 use bullet_core::{
     cpu::{CpuError, CpuMarker, CpuThread},
+    function::{self, DeviceFunction},
     graph::{
+        Graph, GraphNodeIdTy,
         builder::{GraphBuilder, Shape},
-        instruction,
         ir::{
+            BackendMarker, GraphIR, GraphIRError,
             node::AnnotatedNode,
-            operation::{util, GraphIROperation, GraphIROperationCompilable, GraphIROperationError},
-            BackendMarker, GraphIR, GraphIRError, GraphIRNodeInfo,
+            operation::{GraphIROperationBase, GraphIROperationCompilable, GraphIROperationError, util},
         },
-        GraphFunction, NodeId, NodeIdTy,
     },
 };
 
@@ -59,7 +60,7 @@ struct MyCustomAdd {
     b: AnnotatedNode,
 }
 
-impl<B: BackendMarker> GraphIROperation<B> for MyCustomAdd {
+impl<B: BackendMarker> GraphIROperationBase<B> for MyCustomAdd {
     fn nodes(&self) -> Vec<AnnotatedNode> {
         vec![self.a, self.b]
     }
@@ -78,37 +79,33 @@ impl<B: BackendMarker> GraphIROperation<B> for MyCustomAdd {
 }
 
 impl GraphIROperationCompilable<CpuMarker> for MyCustomAdd {
-    fn forward_pass(&self, _node_info: &GraphIRNodeInfo, output_node: usize) -> GraphFunction<CpuThread> {
-        let a = NodeId::new(self.a.idx, NodeIdTy::Values);
-        let b = NodeId::new(self.b.idx, NodeIdTy::Values);
-        let output = NodeId::new(output_node, NodeIdTy::Values);
+    fn forward_pass(&self, graph: &Graph<CpuThread>, output_node: NodeId) -> DeviceFunction<CpuThread> {
+        let a = graph.get_ref(self.a.idx, GraphNodeIdTy::Values);
+        let b = graph.get_ref(self.b.idx, GraphNodeIdTy::Values);
+        let output = graph.get_ref(output_node, GraphNodeIdTy::Values);
 
-        let mut func = GraphFunction::default();
+        let mut func = DeviceFunction::default();
 
-        func.push(instruction::MaybeUpdateBatchSize { input: a, output });
-        func.push(instruction::LinearCombination { input: a, input_mul: 1.0, output, output_mul: 0.0 });
-        func.push(instruction::LinearCombination { input: b, input_mul: 1.0, output, output_mul: 1.0 });
+        func.push(function::MaybeUpdateBatchSize { input: a.clone(), output: output.clone() });
+        func.push(function::LinearCombination { input: a, input_mul: 1.0, output: output.clone(), output_mul: 0.0 });
+        func.push(function::LinearCombination { input: b, input_mul: 1.0, output, output_mul: 1.0 });
 
         func
     }
 
-    fn backward_pass(&self, node_info: &GraphIRNodeInfo, output_node: usize) -> GraphFunction<CpuThread> {
-        let input = NodeId::new(output_node, NodeIdTy::Gradients);
+    fn backward_pass(&self, graph: &Graph<CpuThread>, output_node: NodeId) -> DeviceFunction<CpuThread> {
+        let input = graph.get_ref(output_node, GraphNodeIdTy::Gradients);
 
-        let mut func = GraphFunction::default();
+        let mut func = DeviceFunction::default();
 
-        if node_info.get(self.a.idx).unwrap().requires_grad {
-            let output = NodeId::new(self.a.idx, NodeIdTy::Gradients);
-
-            func.push(instruction::MaybeUpdateBatchSize { input, output });
-            func.push(instruction::LinearCombination { input, input_mul: 1.0, output, output_mul: 1.0 });
+        if let Some(output) = graph.maybe_get_ref(self.a.idx, GraphNodeIdTy::Gradients) {
+            func.push(function::MaybeUpdateBatchSize { input: input.clone(), output: output.clone() });
+            func.push(function::LinearCombination { input: input.clone(), input_mul: 1.0, output, output_mul: 1.0 });
         }
 
-        if node_info.get(self.b.idx).unwrap().requires_grad {
-            let output = NodeId::new(self.b.idx, NodeIdTy::Gradients);
-
-            func.push(instruction::MaybeUpdateBatchSize { input, output });
-            func.push(instruction::LinearCombination { input, input_mul: 1.0, output, output_mul: 1.0 });
+        if let Some(output) = graph.maybe_get_ref(self.b.idx, GraphNodeIdTy::Gradients) {
+            func.push(function::MaybeUpdateBatchSize { input: input.clone(), output: output.clone() });
+            func.push(function::LinearCombination { input, input_mul: 1.0, output, output_mul: 1.0 });
         }
 
         func

@@ -2,14 +2,12 @@ use std::sync::Arc;
 
 use crate::{
     device::{
+        Device, DeviceBuffer,
         base::{AdamConfig, BaseOperations},
         blas::{BlasOperations, GemmConfig},
-        Device, DeviceBuffer,
     },
-    graph::{
-        ir::{operation::unary::DiffableFromOutput, shape::Shape},
-        tensor::rng,
-    },
+    graph::ir::{operation::unary::DiffableFromOutput, shape::Shape},
+    tensor::rng,
 };
 
 use super::{CpuBuffer, CpuThread};
@@ -32,7 +30,9 @@ impl CpuThread {
             let shape_a = Shape::new(m, n).maybe_transpose(trans_a);
             let shape_b = Shape::new(n, k).maybe_transpose(trans_b);
             let config = GemmConfig { alpha, beta, shape_a, trans_a, shape_b, trans_b };
-            print!("gemm alpha={alpha} beta={beta} shape_a=({shape_a}) shape_b=({shape_b}) trans_a={trans_a} trans_b={trans_b}... ");
+            print!(
+                "gemm alpha={alpha} beta={beta} shape_a=({shape_a}) shape_b=({shape_b}) trans_a={trans_a} trans_b={trans_b}... "
+            );
             display_passed(gemm_equal(device.clone(), config));
         }
     }
@@ -47,7 +47,9 @@ impl CpuThread {
             let shape_a = Shape::new(m, n).maybe_transpose(trans_a);
             let shape_b = Shape::new(n, k).maybe_transpose(trans_b);
             let config = GemmConfig { alpha, beta, shape_a, trans_a, shape_b, trans_b };
-            print!("gebmm batch_size={bs} alpha={alpha} beta={beta} shape_a=({shape_a}) shape_b=({shape_b}) trans_a={trans_a} trans_b={trans_b}... ");
+            print!(
+                "gebmm batch_size={bs} alpha={alpha} beta={beta} shape_a=({shape_a}) shape_b=({shape_b}) trans_a={trans_a} trans_b={trans_b}... "
+            );
             display_passed(gebmm_equal(device.clone(), bs, config));
         }
     }
@@ -248,11 +250,11 @@ fn base_op_equal<D: Device>(device: Arc<D>, size: usize, op: BaseOp, fwd: bool) 
         }
         BaseOp::Pairwise => {
             if fwd {
-                ccpu.pairwise_fwd(size, 4, &acpu).unwrap();
-                cdev.pairwise_fwd(size, 4, &adev).unwrap();
+                ccpu.pairwise_fwd(0, size / 2, size, 4, &acpu).unwrap();
+                cdev.pairwise_fwd(0, size / 2, size, 4, &adev).unwrap();
             } else {
-                ccpu.pairwise_bwd(size, 4, &acpu, &bcpu).unwrap();
-                cdev.pairwise_bwd(size, 4, &adev, &bdev).unwrap();
+                ccpu.pairwise_bwd(0, size / 2, size, 4, &acpu, &bcpu).unwrap();
+                cdev.pairwise_bwd(0, size / 2, size, 4, &adev, &bdev).unwrap();
             }
         }
         BaseOp::PowerErr => {

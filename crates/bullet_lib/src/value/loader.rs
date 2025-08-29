@@ -7,7 +7,7 @@ pub mod viribinpack;
 
 use bullet_core::{
     device::OperationError,
-    graph::{builder::Shape, NodeId, NodeIdTy},
+    graph::{GraphNodeId, GraphNodeIdTy, builder::Shape},
 };
 use bulletformat::BulletFormat;
 pub use direct::{CanBeDirectlySequentiallyLoaded, DirectSequentialDataLoader};
@@ -204,7 +204,7 @@ where
                 .zip(prep.nstm.value.chunks_mut(sparse_chunk_size))
                 .zip(prep.buckets.value.chunks_mut(chunk_size))
                 .zip(prep.targets.value.chunks_mut(output_size * chunk_size))
-                .zip(prep.weights.value.chunks_mut(output_size * chunk_size))
+                .zip(prep.weights.value.chunks_mut(chunk_size))
                 .for_each(
                     |(((((data_chunk, stm_chunk), nstm_chunk), buckets_chunk), results_chunk), weights_chunk)| {
                         let inp = &prep.input_getter;
@@ -284,47 +284,49 @@ where
     let batch_size = prepared.batch_size;
     let expected_inputs = prepared.input_getter.num_inputs();
 
-    if let Some(idx) = graph.input_idx("stm") {
-        let input = &prepared.stm;
-        let stm = &mut *graph.get_mut(NodeId::new(idx, NodeIdTy::Values)).unwrap();
+    unsafe {
+        if let Some(idx) = graph.input_idx("stm") {
+            let input = &prepared.stm;
+            let stm = &mut *graph.get_mut(GraphNodeId::new(idx, GraphNodeIdTy::Values)).unwrap();
 
-        if stm.values.single_size() != expected_inputs {
-            return Err(OperationError::InvalidTensorFormat);
+            if stm.values.single_size() != expected_inputs {
+                return Err(OperationError::InvalidTensorFormat);
+            }
+
+            stm.load_sparse_from_slice(input.max_active, Some(batch_size), &input.value)?;
         }
 
-        stm.load_sparse_from_slice(input.max_active, Some(batch_size), &input.value)?;
-    }
+        if let Some(idx) = graph.input_idx("nstm") {
+            let input = &prepared.nstm;
+            let ntm = &mut *graph.get_mut(GraphNodeId::new(idx, GraphNodeIdTy::Values)).unwrap();
 
-    if let Some(idx) = graph.input_idx("nstm") {
-        let input = &prepared.nstm;
-        let ntm = &mut *graph.get_mut(NodeId::new(idx, NodeIdTy::Values)).unwrap();
+            if ntm.values.single_size() != expected_inputs {
+                return Err(OperationError::InvalidTensorFormat);
+            }
 
-        if ntm.values.single_size() != expected_inputs {
-            return Err(OperationError::InvalidTensorFormat);
+            ntm.load_sparse_from_slice(input.max_active, Some(batch_size), &input.value)?;
         }
 
-        ntm.load_sparse_from_slice(input.max_active, Some(batch_size), &input.value)?;
-    }
+        if let Some(idx) = graph.input_idx("buckets") {
+            let input = &prepared.buckets;
+            let buckets = &mut *graph.get_mut(GraphNodeId::new(idx, GraphNodeIdTy::Values)).unwrap();
 
-    if let Some(idx) = graph.input_idx("buckets") {
-        let input = &prepared.buckets;
-        let buckets = &mut *graph.get_mut(NodeId::new(idx, NodeIdTy::Values)).unwrap();
+            if buckets.values.single_size() != Out::BUCKETS {
+                return Err(OperationError::InvalidTensorFormat);
+            }
 
-        if buckets.values.single_size() != Out::BUCKETS {
-            return Err(OperationError::InvalidTensorFormat);
+            buckets.load_sparse_from_slice(input.max_active, Some(batch_size), &input.value)?;
         }
-
-        buckets.load_sparse_from_slice(input.max_active, Some(batch_size), &input.value)?;
     }
 
     if let Some(idx) = graph.input_idx("entry_weights") {
-        let weights = &mut *graph.get_mut(NodeId::new(idx, NodeIdTy::Values)).unwrap();
+        let weights = &mut *graph.get_mut(GraphNodeId::new(idx, GraphNodeIdTy::Values)).unwrap();
         weights.load_dense_from_slice(Some(batch_size), &prepared.weights.value)?;
     }
 
     if let Some(idx) = graph.input_idx("targets") {
         graph
-            .get_mut(NodeId::new(idx, NodeIdTy::Values))
+            .get_mut(GraphNodeId::new(idx, GraphNodeIdTy::Values))
             .unwrap()
             .load_dense_from_slice(Some(batch_size), &prepared.targets.value)?;
     }

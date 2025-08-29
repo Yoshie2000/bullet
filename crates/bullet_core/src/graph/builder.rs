@@ -1,6 +1,7 @@
 mod affine;
 mod node;
 
+use acyclib::graph::NodeId;
 pub use affine::Affine;
 pub use node::{Activation, GraphBuilderNode};
 
@@ -12,14 +13,14 @@ use std::{
 use crate::{
     device::Device,
     graph::{
+        Graph, GraphNodeId, GraphNodeIdTy,
         ir::{
+            BackendMarker, GraphIRManager,
             operation::{
-                unary::{Reduce, ReduceAcrossBatch},
                 GraphIROperationCompilable,
+                unary::{Reduce, ReduceAcrossBatch},
             },
-            BackendMarker, GraphIR, GraphIRCompileOptions,
         },
-        Graph, NodeId, NodeIdTy,
     },
 };
 
@@ -34,13 +35,14 @@ pub enum InitSettings {
 
 #[derive(Default)]
 pub struct GraphBuilder<B: BackendMarker> {
-    ir: Mutex<GraphIR<B>>,
+    ir: Mutex<GraphIRManager<B>>,
     init_data: Mutex<HashMap<String, InitSettings>>,
-    consts: Mutex<HashMap<usize, Vec<f32>>>,
+    consts: Mutex<HashMap<NodeId, Vec<f32>>>,
+    dump_graphviz: Mutex<Option<String>>,
 }
 
 impl<B: BackendMarker> GraphBuilder<B> {
-    fn ir(&self) -> MutexGuard<'_, GraphIR<B>> {
+    pub fn ir(&self) -> MutexGuard<'_, GraphIRManager<B>> {
         self.ir.try_lock().unwrap()
     }
 
@@ -102,7 +104,7 @@ impl<B: BackendMarker> GraphBuilder<B> {
 
     /// Outputs the `GraphIR` before and after optimisation to the given `path`, at compilation time.
     pub fn dump_graphviz(&self, path: &str) {
-        self.ir().set_compile_opts(GraphIRCompileOptions { dump_graphviz: Some(path.to_string()) });
+        *self.dump_graphviz.try_lock().unwrap() = Some(path.to_string());
     }
 }
 
@@ -111,8 +113,25 @@ impl<D: Device<Marker = B>, B: BackendMarker<Backend = D>> GraphBuilder<B> {
         let mut ir = self.ir.into_inner().unwrap();
         let root = ir.root().unwrap();
 
-        if ir.get(root.idx).unwrap().info.batched {
+        if ir.get(root.idx).unwrap().ty().batched {
             ir.add_op(ReduceAcrossBatch { input: root, reduction: Reduce::Sum }).unwrap();
+        }
+
+        if let Some(path) = self.dump_graphviz.try_lock().unwrap().clone() {
+            use std::io::Write;
+            let opts = "style=filled;\ncolor=lightgrey;\nnode [style=filled,color=white];\n";
+            let unoptim = ir.as_graphviz("unoptim").unwrap();
+            let unoptim = format!("subgraph cluster_0 {{\nlabel=\"Unoptimised\";\n{opts}{unoptim}}}");
+
+            ir.optimise().unwrap();
+
+            let optim = ir.as_graphviz("optim").unwrap();
+            let optim = format!("subgraph cluster_1 {{\nlabel=\"Optimised\";\n{opts}{optim}}}");
+
+            let mut file = std::fs::File::create(path).unwrap();
+            write!(&mut file, "digraph G {{\n{unoptim}\n{optim}}}").unwrap();
+        } else {
+            ir.optimise().unwrap();
         }
 
         let graph = ir.compile(device).unwrap();
@@ -121,12 +140,12 @@ impl<D: Device<Marker = B>, B: BackendMarker<Backend = D>> GraphBuilder<B> {
             match *init_data {
                 InitSettings::Zeroed => {}
                 InitSettings::Normal { mean, stdev } => graph
-                    .get_mut(NodeId::new(graph.weight_idx(id).unwrap(), NodeIdTy::Values))
+                    .get_mut(GraphNodeId::new(graph.weight_idx(id).unwrap(), GraphNodeIdTy::Values))
                     .unwrap()
                     .seed_random(mean, stdev, true)
                     .unwrap(),
                 InitSettings::Uniform { mean, stdev } => graph
-                    .get_mut(NodeId::new(graph.weight_idx(id).unwrap(), NodeIdTy::Values))
+                    .get_mut(GraphNodeId::new(graph.weight_idx(id).unwrap(), GraphNodeIdTy::Values))
                     .unwrap()
                     .seed_random(mean, stdev, false)
                     .unwrap(),
@@ -134,7 +153,11 @@ impl<D: Device<Marker = B>, B: BackendMarker<Backend = D>> GraphBuilder<B> {
         }
 
         for (&idx, vals) in self.consts.lock().unwrap().iter() {
-            graph.get_mut(NodeId::new(idx, NodeIdTy::Values)).unwrap().load_dense_from_slice(None, vals).unwrap();
+            graph
+                .get_mut(GraphNodeId::new(idx, GraphNodeIdTy::Values))
+                .unwrap()
+                .load_dense_from_slice(None, vals)
+                .unwrap();
         }
 
         graph

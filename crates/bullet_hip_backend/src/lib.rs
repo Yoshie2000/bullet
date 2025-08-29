@@ -4,18 +4,16 @@ mod matmul;
 pub mod sparse;
 
 pub use backend::ExecutionContext;
-use backend::{bindings, ops, util, Buffer};
+use backend::{Buffer, bindings, ops, util};
 
 use bullet_core::{
     device::{
+        Device, DeviceBuffer, OperationError,
         base::{AdamConfig, BaseOperations},
         blas::{BlasOperations, GemmConfig},
-        Device, DeviceBuffer, OperationError,
     },
-    graph::{
-        ir::{operation::unary::DiffableFromOutput, shape::Shape, BackendMarker},
-        tensor,
-    },
+    graph::ir::{BackendMarker, operation::unary::DiffableFromOutput, shape::Shape},
+    tensor,
 };
 
 pub type DenseMatrix = tensor::DenseMatrix<ExecutionContext>;
@@ -34,21 +32,13 @@ pub enum DeviceError {
 
 impl From<bindings::cublasStatus_t> for Result<(), DeviceError> {
     fn from(value: bindings::cublasStatus_t) -> Self {
-        if value == bindings::CUBLAS_SUCCESS {
-            Ok(())
-        } else {
-            Err(DeviceError::Cublas(value))
-        }
+        if value == bindings::CUBLAS_SUCCESS { Ok(()) } else { Err(DeviceError::Cublas(value)) }
     }
 }
 
 impl From<bindings::cudaError_t> for Result<(), DeviceError> {
     fn from(value: bindings::cudaError_t) -> Self {
-        if value == bindings::SUCCESS {
-            Ok(())
-        } else {
-            Err(DeviceError::Cuda(value))
-        }
+        if value == bindings::SUCCESS { Ok(()) } else { Err(DeviceError::Cuda(value)) }
     }
 }
 
@@ -226,12 +216,27 @@ impl BaseOperations for Buffer<f32> {
         dense::copy_or_add_strided(rows, cols, a, offset_a, stride_a, self, offset, stride, add)
     }
 
-    fn pairwise_fwd(&mut self, size: usize, batch_size: usize, a: &Self) -> Result<(), Self::BaseError> {
-        dense::pairwise(size, batch_size, a, self)
+    fn pairwise_fwd(
+        &mut self,
+        offset: usize,
+        stride: usize,
+        size: usize,
+        batch_size: usize,
+        a: &Self,
+    ) -> Result<(), Self::BaseError> {
+        dense::pairwise(offset, stride, size, batch_size, a, self)
     }
 
-    fn pairwise_bwd(&mut self, size: usize, batch_size: usize, a: &Self, grd: &Self) -> Result<(), Self::BaseError> {
-        dense::backprop_pairwise(size, batch_size, a, grd, self)
+    fn pairwise_bwd(
+        &mut self,
+        offset: usize,
+        stride: usize,
+        size: usize,
+        batch_size: usize,
+        a: &Self,
+        grd: &Self,
+    ) -> Result<(), Self::BaseError> {
+        dense::backprop_pairwise(offset, stride, size, batch_size, a, grd, self)
     }
 
     fn power_error_fwd(&mut self, power: f32, size: usize, a: &Self, b: &Self) -> Result<(), Self::BaseError> {
@@ -265,7 +270,7 @@ impl BaseOperations for Buffer<f32> {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct HipMarker;
 impl BackendMarker for HipMarker {
     type Backend = ExecutionContext;
@@ -292,7 +297,6 @@ impl Device for ExecutionContext {
 
     fn backprop_sparse_affine_activate(
         batch_size: usize,
-        stride: Option<bool>,
         activation: DiffableFromOutput,
         input_a_grad: &mut Self::BufferF32,
         shape_a: Shape,
@@ -307,7 +311,6 @@ impl Device for ExecutionContext {
     ) -> OperationResult {
         sparse::backprop_sparse_affine(
             batch_size,
-            stride,
             activation,
             input_a_grad,
             shape_a,
@@ -324,7 +327,6 @@ impl Device for ExecutionContext {
 
     fn sparse_affine_activate(
         batch_size: usize,
-        stride: Option<bool>,
         activation: DiffableFromOutput,
         input_a: &Self::BufferF32,
         shape_a: Shape,
@@ -338,7 +340,6 @@ impl Device for ExecutionContext {
     ) -> OperationResult {
         sparse::sparse_affine(
             batch_size,
-            stride,
             activation,
             input_a,
             shape_a,
@@ -354,24 +355,34 @@ impl Device for ExecutionContext {
 
     fn select(
         batch_size: usize,
+        input_batched: bool,
         input_size: usize,
         output_size: usize,
         input: &Self::BufferF32,
         indices: &Self::BufferI32,
         output: &mut Self::BufferF32,
     ) -> OperationResult {
-        sparse::select(batch_size, input_size, output_size, input, indices, output)
+        sparse::select(batch_size, input_batched, input_size, output_size, input, indices, output)
     }
 
     fn select_backprop(
         batch_size: usize,
+        input_grad_batched: bool,
         input_size: usize,
         output_size: usize,
         indices: &Self::BufferI32,
         output_grad: &Self::BufferF32,
         input_grad: &mut Self::BufferF32,
     ) -> OperationResult {
-        sparse::select_backprop(batch_size, input_size, output_size, indices, output_grad, input_grad)
+        sparse::select_backprop(
+            batch_size,
+            input_grad_batched,
+            input_size,
+            output_size,
+            indices,
+            output_grad,
+            input_grad,
+        )
     }
 
     fn sparse_to_dense(

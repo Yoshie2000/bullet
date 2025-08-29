@@ -1,83 +1,54 @@
 pub mod builder;
-pub mod instruction;
 pub mod ir;
-pub mod tensor;
 
 use std::{
-    cell::{Ref, RefCell, RefMut},
+    cell::{Ref, RefMut},
     collections::HashMap,
     fmt::Debug,
-    sync::{Arc, Mutex},
-    time::Instant,
+    sync::Arc,
 };
 
-use instruction::GraphInstruction;
-use ir::{node::AnnotatedNode, shape::Shape, GraphIRError};
-use tensor::{read_from_byte_buffer, Tensor};
+use acyclib::graph::NodeId;
+use ir::{GraphIRError, node::AnnotatedNode, shape::Shape};
 
-use crate::device::{Device, OperationError};
-
-pub struct GraphFunction<D: Device> {
-    instructions: Vec<Box<dyn GraphInstruction<D>>>,
-}
-
-impl<D: Device> Default for GraphFunction<D> {
-    fn default() -> Self {
-        Self { instructions: Vec::new() }
-    }
-}
-
-impl<D: Device> GraphFunction<D> {
-    pub fn push(&mut self, instruction: impl GraphInstruction<D>) {
-        self.instructions.push(Box::new(instruction));
-    }
-
-    pub fn extend(&mut self, rhs: Self) {
-        for instr in rhs.instructions {
-            self.instructions.push(instr);
-        }
-    }
-}
+use crate::{
+    device::{Device, OperationError},
+    function::DeviceFunction,
+    tensor::{Tensor, TensorRef, read_from_byte_buffer},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum NodeIdTy {
+pub enum GraphNodeIdTy {
     Values,
     Gradients,
     Ancillary(u16),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NodeId {
-    id: usize,
-    ty: NodeIdTy,
+pub struct GraphNodeId {
+    id: NodeId,
+    ty: GraphNodeIdTy,
 }
 
-impl NodeId {
-    pub fn new(id: usize, ty: NodeIdTy) -> Self {
+impl GraphNodeId {
+    pub fn new(id: NodeId, ty: GraphNodeIdTy) -> Self {
         Self { id, ty }
     }
 }
 
-impl std::fmt::Debug for NodeId {
+impl std::fmt::Debug for GraphNodeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Id({}, {:?})", self.id, self.ty)
+        write!(f, "Id({}, {:?})", self.id.inner(), self.ty)
     }
 }
 
-#[derive(Clone, Copy)]
-struct ProfileInfo {
-    executions: usize,
-    total_time_micros: u128,
-}
-
 pub struct Graph<D: Device> {
-    nodes: HashMap<NodeId, RefCell<Tensor<D>>>,
-    inputs: HashMap<String, usize>,
-    weights: HashMap<String, usize>,
-    functions: HashMap<String, GraphFunction<D>>,
-    profiles: HashMap<String, Mutex<Vec<ProfileInfo>>>,
+    nodes: HashMap<GraphNodeId, TensorRef<D>>,
+    inputs: HashMap<String, NodeId>,
+    weights: HashMap<String, NodeId>,
+    functions: HashMap<String, DeviceFunction<D>>,
     device: Arc<D>,
-    root: usize,
+    root: NodeId,
 }
 
 #[derive(Debug)]
@@ -101,12 +72,12 @@ impl<T: Debug> From<OperationError<T>> for GraphError<T> {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Node {
-    idx: usize,
+    idx: NodeId,
     pub shape: Shape,
 }
 
 impl Node {
-    pub fn idx(&self) -> usize {
+    pub fn idx(&self) -> NodeId {
         self.idx
     }
 }
@@ -123,11 +94,19 @@ impl<D: Device> Graph<D> {
     }
 
     pub fn get_node_values(&self, node: Node) -> Ref<'_, Tensor<D>> {
-        self.get(NodeId::new(node.idx, NodeIdTy::Values)).unwrap()
+        self.get(GraphNodeId::new(node.idx, GraphNodeIdTy::Values)).unwrap()
     }
 
-    pub fn get(&self, id: NodeId) -> Result<Ref<'_, Tensor<D>>, OperationError<D::DeviceError>> {
-        if let Some(tensor) = &self.nodes.get(&id) {
+    pub fn get_ref(&self, id: NodeId, ty: GraphNodeIdTy) -> TensorRef<D> {
+        self.nodes.get(&GraphNodeId::new(id, ty)).cloned().unwrap()
+    }
+
+    pub fn maybe_get_ref(&self, id: NodeId, ty: GraphNodeIdTy) -> Option<TensorRef<D>> {
+        self.nodes.get(&GraphNodeId::new(id, ty)).cloned()
+    }
+
+    pub fn get(&self, id: GraphNodeId) -> Result<Ref<'_, Tensor<D>>, OperationError<D::DeviceError>> {
+        if let Some(tensor) = self.nodes.get(&id) {
             Ok(tensor.borrow())
         } else {
             println!("Cant find: {id:?}");
@@ -135,8 +114,8 @@ impl<D: Device> Graph<D> {
         }
     }
 
-    pub fn get_mut(&self, id: NodeId) -> Result<RefMut<'_, Tensor<D>>, OperationError<D::DeviceError>> {
-        if let Some(tensor) = &self.nodes.get(&id) {
+    pub fn get_mut(&self, id: GraphNodeId) -> Result<RefMut<'_, Tensor<D>>, OperationError<D::DeviceError>> {
+        if let Some(tensor) = self.nodes.get(&id) {
             Ok(tensor.borrow_mut())
         } else {
             Err(OperationError::TensorOptimisedOut)
@@ -145,97 +124,46 @@ impl<D: Device> Graph<D> {
 
     pub fn get_weights(&self, id: &str) -> Ref<'_, Tensor<D>> {
         let idx = self.weight_idx(id).unwrap();
-        self.get(NodeId::new(idx, NodeIdTy::Values)).unwrap()
+        self.get(GraphNodeId::new(idx, GraphNodeIdTy::Values)).unwrap()
     }
 
     pub fn get_weights_mut(&self, id: &str) -> RefMut<'_, Tensor<D>> {
         let idx = self.weight_idx(id).unwrap();
-        self.get_mut(NodeId::new(idx, NodeIdTy::Values)).unwrap()
+        self.get_mut(GraphNodeId::new(idx, GraphNodeIdTy::Values)).unwrap()
     }
 
     pub fn get_input(&self, id: &str) -> Ref<'_, Tensor<D>> {
         let idx = self.input_idx(id).unwrap();
-        self.get(NodeId::new(idx, NodeIdTy::Values)).unwrap()
+        self.get(GraphNodeId::new(idx, GraphNodeIdTy::Values)).unwrap()
     }
 
     pub fn get_input_mut(&self, id: &str) -> RefMut<'_, Tensor<D>> {
         let idx = self.input_idx(id).unwrap();
-        self.get_mut(NodeId::new(idx, NodeIdTy::Values)).unwrap()
+        self.get_mut(GraphNodeId::new(idx, GraphNodeIdTy::Values)).unwrap()
     }
 
-    fn root(&self) -> usize {
+    fn root(&self) -> NodeId {
         self.root
     }
 
-    pub fn profile_function(&mut self, id: &str) -> Result<(), OperationError<D::DeviceError>> {
-        let func = self.functions.get(id).ok_or(OperationError::UnsupportedOperation)?;
-
-        let _ = self.profiles.insert(
-            id.to_string(),
-            Mutex::new(vec![ProfileInfo { executions: 0, total_time_micros: 0 }; func.instructions.len()]),
-        );
-
-        Ok(())
+    pub fn profile_function(&mut self, _id: &str) -> Result<(), OperationError<D::DeviceError>> {
+        todo!();
     }
 
-    pub fn display_profile(&self, id: &str) -> Result<(), OperationError<D::DeviceError>> {
-        let func = self.functions.get(id).ok_or(OperationError::UnsupportedOperation)?;
-        let profile = self.profiles.get(id).ok_or(OperationError::UnsupportedOperation)?;
-
-        println!("Profile for function '{id}':");
-        for (instr, info) in func.instructions.iter().zip(profile.lock().unwrap().iter()) {
-            let avg_time = info.total_time_micros / info.executions as u128;
-            let dbg = format!("{instr:?}");
-            let instr_name = dbg.split_whitespace().next().unwrap();
-
-            println!("{avg_time: >6} micros for {instr_name}");
-        }
-
-        Ok(())
+    pub fn display_profile(&self, _id: &str) -> Result<(), OperationError<D::DeviceError>> {
+        todo!();
     }
 
     pub fn display_function_code(&self, id: &str) -> Result<(), OperationError<D::DeviceError>> {
-        for instr in &self.functions.get(id).ok_or(OperationError::UnsupportedOperation)?.instructions {
-            println!("{instr:?}");
-        }
+        let func = self.functions.get(id).ok_or(OperationError::UnsupportedOperation)?;
+
+        println!("{func}");
 
         Ok(())
     }
 
     pub fn execute(&mut self, id: &str) -> Result<(), OperationError<D::DeviceError>> {
-        let func = self.functions.get(id).ok_or(OperationError::UnsupportedOperation)?;
-
-        if let Some(profile) = self.profiles.get(id) {
-            for (instr, info) in func.instructions.iter().zip(profile.lock().unwrap().iter_mut()) {
-                if let Err(e) = self.device().synchronise() {
-                    println!("Error {e:?} in function '{id}' before executing {instr:?}");
-                    return Err(OperationError::DeviceError(Box::new(e)));
-                }
-                let t = Instant::now();
-
-                if let Err(e) = instr.execute(self) {
-                    println!("Error {e:?} in function '{id}' executing {instr:?}");
-                    return Err(e);
-                }
-
-                if let Err(e) = self.device().synchronise() {
-                    println!("Error {e:?} in function '{id}' after executing {instr:?}");
-                    return Err(OperationError::DeviceError(Box::new(e)));
-                }
-
-                info.executions += 1;
-                info.total_time_micros += t.elapsed().as_micros();
-            }
-        } else {
-            for instr in &func.instructions {
-                if let Err(e) = instr.execute(self) {
-                    println!("Error {e:?} in function '{id}' executing {instr:?}");
-                    return Err(e);
-                }
-            }
-        }
-
-        Ok(())
+        self.functions.get(id).ok_or(OperationError::UnsupportedOperation)?.execute()
     }
 
     pub fn forward(&mut self) -> Result<f32, OperationError<D::DeviceError>> {
@@ -260,7 +188,7 @@ impl<D: Device> Graph<D> {
     }
 
     pub fn get_output_val(&self) -> Result<f32, OperationError<D::DeviceError>> {
-        Ok(self.get(NodeId::new(self.root(), NodeIdTy::Values))?.get_scalar().unwrap())
+        Ok(self.get(GraphNodeId::new(self.root(), GraphNodeIdTy::Values))?.get_scalar().unwrap())
     }
 
     /// Writes the weights of a graph to a file. If `gradients` is true,
@@ -274,7 +202,7 @@ impl<D: Device> Graph<D> {
 
         for id in &weight_ids {
             let idx = *self.weights.get(id).unwrap();
-            let weights = self.get_mut(NodeId::new(idx, NodeIdTy::Values)).unwrap();
+            let weights = self.get_mut(GraphNodeId::new(idx, GraphNodeIdTy::Values)).unwrap();
             let this_buf = weights.dense().unwrap().write_to_byte_buffer(id).unwrap();
 
             buf.extend_from_slice(&this_buf);
@@ -305,7 +233,7 @@ impl<D: Device> Graph<D> {
             }
 
             let idx = *self.weights.get(&id).unwrap();
-            let mut weights = self.get_mut(NodeId::new(idx, NodeIdTy::Values)).unwrap();
+            let mut weights = self.get_mut(GraphNodeId::new(idx, GraphNodeIdTy::Values)).unwrap();
             let weights = weights.dense_mut().unwrap();
             let exp_size = weights.size();
 
@@ -331,11 +259,11 @@ impl<D: Device> Graph<D> {
         self.weights.keys().cloned().collect()
     }
 
-    pub fn input_idx(&self, id: &str) -> Option<usize> {
+    pub fn input_idx(&self, id: &str) -> Option<NodeId> {
         self.inputs.get(id).copied()
     }
 
-    pub fn weight_idx(&self, id: &str) -> Option<usize> {
+    pub fn weight_idx(&self, id: &str) -> Option<NodeId> {
         self.weights.get(id).copied()
     }
 
@@ -344,7 +272,7 @@ impl<D: Device> Graph<D> {
 
         for weight in self.weight_ids() {
             let idx = *self.weights.get(&weight).unwrap();
-            total += self.get(NodeId::new(idx, NodeIdTy::Values)).unwrap().dense().unwrap().size();
+            total += self.get(GraphNodeId::new(idx, GraphNodeIdTy::Values)).unwrap().dense().unwrap().size();
         }
 
         total
