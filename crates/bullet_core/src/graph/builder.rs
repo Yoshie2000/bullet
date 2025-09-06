@@ -18,8 +18,11 @@ use crate::{
             BackendMarker, GraphIRManager,
             operation::{
                 GraphIROperationCompilable,
+                binary::Select,
+                sparse::SparseAffineActivate,
                 unary::{Reduce, ReduceAcrossBatch},
             },
+            passes::GraphIRPass,
         },
     },
 };
@@ -39,11 +42,17 @@ pub struct GraphBuilder<B: BackendMarker> {
     init_data: Mutex<HashMap<String, InitSettings>>,
     consts: Mutex<HashMap<NodeId, Vec<f32>>>,
     dump_graphviz: Mutex<Option<String>>,
+    custom_passes: Mutex<Vec<Box<dyn GraphIRPass<B>>>>,
+    dump_ir_on_build: bool,
 }
 
 impl<B: BackendMarker> GraphBuilder<B> {
     pub fn ir(&self) -> MutexGuard<'_, GraphIRManager<B>> {
         self.ir.try_lock().unwrap()
+    }
+
+    pub fn add_custom_pass(&self, pass: impl GraphIRPass<B> + 'static) {
+        self.custom_passes.try_lock().unwrap().push(Box::new(pass));
     }
 
     fn init(&self) -> MutexGuard<'_, HashMap<String, InitSettings>> {
@@ -58,6 +67,10 @@ impl<B: BackendMarker> GraphBuilder<B> {
                 panic!();
             }
         }
+    }
+
+    pub fn dump_ir_on_build(&mut self) {
+        self.dump_ir_on_build = true;
     }
 
     pub fn new_dense_input<'a>(&'a self, id: &str, shape: Shape) -> GraphBuilderNode<'a, B> {
@@ -108,7 +121,11 @@ impl<B: BackendMarker> GraphBuilder<B> {
     }
 }
 
-impl<D: Device<Marker = B>, B: BackendMarker<Backend = D>> GraphBuilder<B> {
+impl<D: Device<Marker = B>, B: BackendMarker<Backend = D>> GraphBuilder<B>
+where
+    SparseAffineActivate: GraphIROperationCompilable<B>,
+    Select: GraphIROperationCompilable<B>,
+{
     pub fn build(self, device: D) -> Graph<D> {
         let mut ir = self.ir.into_inner().unwrap();
         let root = ir.root().unwrap();
@@ -124,6 +141,9 @@ impl<D: Device<Marker = B>, B: BackendMarker<Backend = D>> GraphBuilder<B> {
             let unoptim = format!("subgraph cluster_0 {{\nlabel=\"Unoptimised\";\n{opts}{unoptim}}}");
 
             ir.optimise().unwrap();
+            for pass in self.custom_passes.into_inner().unwrap() {
+                ir.apply_any_pass(pass.as_ref()).unwrap();
+            }
 
             let optim = ir.as_graphviz("optim").unwrap();
             let optim = format!("subgraph cluster_1 {{\nlabel=\"Optimised\";\n{opts}{optim}}}");
@@ -132,6 +152,13 @@ impl<D: Device<Marker = B>, B: BackendMarker<Backend = D>> GraphBuilder<B> {
             write!(&mut file, "digraph G {{\n{unoptim}\n{optim}}}").unwrap();
         } else {
             ir.optimise().unwrap();
+            for pass in self.custom_passes.into_inner().unwrap() {
+                ir.apply_any_pass(pass.as_ref()).unwrap();
+            }
+        }
+
+        if self.dump_ir_on_build {
+            println!("{}", ir.formatted().unwrap());
         }
 
         let graph = ir.compile(device).unwrap();
@@ -140,13 +167,15 @@ impl<D: Device<Marker = B>, B: BackendMarker<Backend = D>> GraphBuilder<B> {
             match *init_data {
                 InitSettings::Zeroed => {}
                 InitSettings::Normal { mean, stdev } => graph
-                    .get_mut(GraphNodeId::new(graph.weight_idx(id).unwrap(), GraphNodeIdTy::Values))
+                    .get(GraphNodeId::new(graph.weight_idx(id).unwrap(), GraphNodeIdTy::Values))
                     .unwrap()
+                    .dense_mut()
                     .seed_random(mean, stdev, true)
                     .unwrap(),
                 InitSettings::Uniform { mean, stdev } => graph
-                    .get_mut(GraphNodeId::new(graph.weight_idx(id).unwrap(), GraphNodeIdTy::Values))
+                    .get(GraphNodeId::new(graph.weight_idx(id).unwrap(), GraphNodeIdTy::Values))
                     .unwrap()
+                    .dense_mut()
                     .seed_random(mean, stdev, false)
                     .unwrap(),
             };
@@ -154,9 +183,10 @@ impl<D: Device<Marker = B>, B: BackendMarker<Backend = D>> GraphBuilder<B> {
 
         for (&idx, vals) in self.consts.lock().unwrap().iter() {
             graph
-                .get_mut(GraphNodeId::new(idx, GraphNodeIdTy::Values))
+                .get(GraphNodeId::new(idx, GraphNodeIdTy::Values))
                 .unwrap()
-                .load_dense_from_slice(None, vals)
+                .dense_mut()
+                .load_from_slice(None, vals)
                 .unwrap();
         }
 

@@ -1,7 +1,8 @@
 use acyclib::graph::NodeId;
 
 use crate::{
-    function::{self, DeviceFunction},
+    device::{Device, SparseAffineOps},
+    function::{self, DeviceFunction, DeviceOperation},
     graph::{
         Graph, GraphNodeIdTy,
         ir::{
@@ -15,6 +16,27 @@ use crate::{
         },
     },
 };
+
+pub trait SparseAffineImpl: Device {
+    type Fwd: DeviceOperation<Self>;
+    type Bwd: DeviceOperation<Self>;
+
+    fn fwd(op: function::SparseAffineActivate<Self>) -> Self::Fwd;
+    fn bwd(op: function::BackpropSparseAffineActivate<Self>) -> Self::Bwd;
+}
+
+impl<D: SparseAffineOps> SparseAffineImpl for D {
+    type Fwd = function::SparseAffineActivate<Self>;
+    type Bwd = function::BackpropSparseAffineActivate<Self>;
+
+    fn fwd(op: function::SparseAffineActivate<Self>) -> Self::Fwd {
+        op
+    }
+
+    fn bwd(op: function::BackpropSparseAffineActivate<Self>) -> Self::Bwd {
+        op
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct SparseAffineActivate {
@@ -75,7 +97,10 @@ impl<B: BackendMarker> GraphIROperationBase<B> for SparseAffineActivate {
     }
 }
 
-impl<B: BackendMarker> GraphIROperationCompilable<B> for SparseAffineActivate {
+impl<B: BackendMarker> GraphIROperationCompilable<B> for SparseAffineActivate
+where
+    B::Backend: SparseAffineImpl,
+{
     fn forward_pass(&self, graph: &Graph<B::Backend>, output_node: NodeId) -> DeviceFunction<B::Backend> {
         let indices = graph.get_ref(self.indices.idx, GraphNodeIdTy::Values);
         let output = graph.get_ref(output_node, GraphNodeIdTy::Values);
@@ -84,7 +109,7 @@ impl<B: BackendMarker> GraphIROperationCompilable<B> for SparseAffineActivate {
 
         func.push(function::MaybeUpdateBatchSize { input: indices.clone(), output: output.clone() });
 
-        func.push(function::SparseAffineActivate {
+        let op = function::SparseAffineActivate {
             weights: graph.get_ref(self.weights.idx, GraphNodeIdTy::Values),
             weights_shape: self.weights.shape,
             biases: self.biases.map(|b| graph.get_ref(b.idx, GraphNodeIdTy::Values)),
@@ -93,7 +118,9 @@ impl<B: BackendMarker> GraphIROperationCompilable<B> for SparseAffineActivate {
             values: self.values.map(|v| graph.get_ref(v.idx, GraphNodeIdTy::Values)),
             activation: self.activation,
             output,
-        });
+        };
+
+        func.push(<B::Backend as SparseAffineImpl>::fwd(op));
 
         func
     }
@@ -111,7 +138,7 @@ impl<B: BackendMarker> GraphIROperationCompilable<B> for SparseAffineActivate {
                 func.push(function::MaybeUpdateBatchSize { input: indices.clone(), output });
             }
 
-            func.push(function::BackpropSparseAffineActivate {
+            let op = function::BackpropSparseAffineActivate {
                 weights_grads,
                 weights_shape: self.weights.shape,
                 biases_grads: self.biases.map(|b| graph.get_ref(b.idx, GraphNodeIdTy::Gradients)),
@@ -121,7 +148,9 @@ impl<B: BackendMarker> GraphIROperationCompilable<B> for SparseAffineActivate {
                 activation: self.activation,
                 output: graph.get_ref(output_node, GraphNodeIdTy::Values),
                 output_grads: graph.get_ref(output_node, GraphNodeIdTy::Gradients),
-            });
+            };
+
+            func.push(<B::Backend as SparseAffineImpl>::bwd(op));
         } else if let Some(b) = self.biases
             && graph.maybe_get_ref(b.idx, GraphNodeIdTy::Gradients).is_some()
         {

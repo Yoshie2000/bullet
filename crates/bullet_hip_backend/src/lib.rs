@@ -8,7 +8,7 @@ use backend::{Buffer, bindings, ops, util};
 
 use bullet_core::{
     device::{
-        Device, DeviceBuffer, OperationError,
+        CoreDeviceOps, Device, DeviceBuffer, OperationError, SparseAffineOps,
         base::{AdamConfig, BaseOperations},
         blas::{BlasOperations, GemmConfig},
     },
@@ -295,6 +295,18 @@ impl Device for ExecutionContext {
         util::get_last_error()
     }
 
+    fn sparse_to_dense(
+        batch_size: usize,
+        size: usize,
+        nnz: usize,
+        sparse: &Self::BufferI32,
+        dense: &mut Self::BufferF32,
+    ) -> OperationResult {
+        sparse::sparse_to_dense(batch_size, size, nnz, sparse, dense)
+    }
+}
+
+impl SparseAffineOps for ExecutionContext {
     fn backprop_sparse_affine_activate(
         batch_size: usize,
         activation: DiffableFromOutput,
@@ -352,7 +364,9 @@ impl Device for ExecutionContext {
             output,
         )
     }
+}
 
+impl CoreDeviceOps for ExecutionContext {
     fn select(
         batch_size: usize,
         input_batched: bool,
@@ -383,16 +397,6 @@ impl Device for ExecutionContext {
             output_grad,
             input_grad,
         )
-    }
-
-    fn sparse_to_dense(
-        batch_size: usize,
-        size: usize,
-        nnz: usize,
-        sparse: &Self::BufferI32,
-        dense: &mut Self::BufferF32,
-    ) -> OperationResult {
-        sparse::sparse_to_dense(batch_size, size, nnz, sparse, dense)
     }
 
     fn softmax_across_batch(

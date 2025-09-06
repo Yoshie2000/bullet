@@ -1,5 +1,8 @@
-mod sparse_bwd;
-mod sparse_fwd;
+mod blas;
+mod buffer;
+
+pub use blas::convert_gemm_config;
+pub use buffer::CudaBuffer;
 
 use std::{
     collections::HashMap,
@@ -7,16 +10,14 @@ use std::{
 };
 
 use bullet_core::{
-    device::{Device, DeviceBuffer, OperationError, OperationResult},
-    graph::ir::{BackendMarker, operation::unary::DiffableFromOutput, shape::Shape},
+    device::{CoreDeviceOps, Device, DeviceBuffer, OperationError, OperationResult},
+    graph::ir::BackendMarker,
 };
 use cudarc::{
     cublas::{CudaBlas, result::CublasError},
     driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DriverError, LaunchConfig, PushKernelArg},
     nvrtc::{self, CompileError},
 };
-
-use crate::CudaBuffer;
 
 #[derive(Debug, Default)]
 pub enum CudaError {
@@ -117,7 +118,6 @@ impl BackendMarker for CudaMarker {
     type Backend = CudaDevice;
 }
 
-#[allow(unused)]
 impl Device for CudaDevice {
     type Marker = CudaMarker;
     type IdType = usize;
@@ -151,70 +151,43 @@ impl Device for CudaDevice {
         self.synchronise()
     }
 
-    fn sparse_affine_activate(
+    fn sparse_to_dense(
         batch_size: usize,
-        activation: DiffableFromOutput,
-        input_a: &Self::BufferF32,
-        shape_a: Shape,
-        input_b: &Self::BufferI32,
-        input_b_vals: Option<&Self::BufferF32>,
-        shape_b: Shape,
+        size: usize,
         nnz: usize,
-        input_c: Option<&Self::BufferF32>,
-        input_c_batched: bool,
-        output: &mut Self::BufferF32,
+        sparse: &Self::BufferI32,
+        dense: &mut Self::BufferF32,
     ) -> OperationResult<Self::DeviceError> {
-        if input_b_vals.is_some() {
-            return Err(OperationError::UnsupportedOperation);
+        if batch_size * nnz > sparse.size() || batch_size * size > dense.size() {
+            return Err(OperationError::IndexOutOfBounds);
         }
 
-        sparse_fwd::sparse_affine(
-            batch_size,
-            activation,
-            input_a,
-            shape_a,
-            input_b,
-            shape_b,
-            nnz,
-            input_c,
-            input_c_batched,
-            output,
-        )
-    }
+        dense.set_zero()?;
 
-    fn backprop_sparse_affine_activate(
-        batch_size: usize,
-        activation: DiffableFromOutput,
-        input_a_grad: &mut Self::BufferF32,
-        shape_a: Shape,
-        input_b: &Self::BufferI32,
-        input_b_vals: Option<&Self::BufferF32>,
-        shape_b: Shape,
-        nnz: usize,
-        input_c_grad: Option<&mut Self::BufferF32>,
-        input_c_batched: bool,
-        outputs: &Self::BufferF32,
-        output_grad: &Self::BufferF32,
-    ) -> OperationResult<Self::DeviceError> {
-        if input_b_vals.is_some() {
-            return Err(OperationError::UnsupportedOperation);
+        let func = sparse.device.module.load_function("sparse_to_dense").unwrap();
+        let threads = batch_size.min(1024);
+        let blocks = batch_size.div_ceil(threads) as u32;
+        let cfg = LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads as u32, 1, 1), shared_mem_bytes: 0 };
+
+        unsafe {
+            sparse
+                .device
+                .stream
+                .launch_builder(&func)
+                .arg(&(size as i32))
+                .arg(&(batch_size as i32))
+                .arg(&(nnz as i32))
+                .arg(&sparse.buf)
+                .arg(&mut dense.buf)
+                .launch(cfg)
+                .map_err(CudaError::Driver)?;
         }
 
-        sparse_bwd::backprop_sparse_affine(
-            batch_size,
-            activation,
-            input_a_grad,
-            shape_a,
-            input_b,
-            shape_b,
-            nnz,
-            input_c_grad,
-            input_c_batched,
-            outputs,
-            output_grad,
-        )
+        Ok(())
     }
+}
 
+impl CoreDeviceOps for CudaDevice {
     fn select(
         batch_size: usize,
         input_batched: bool,
@@ -323,7 +296,8 @@ impl Device for CudaDevice {
                 .arg(&(batch_size as i32))
                 .arg(&input.buf.slice(0..size))
                 .arg(&mut output.buf.slice_mut(0..size))
-                .launch(cfg);
+                .launch(cfg)
+                .map_err(CudaError::Driver)?;
         }
 
         Ok(())
@@ -352,7 +326,8 @@ impl Device for CudaDevice {
                 .arg(&pred.buf.slice(0..size))
                 .arg(&target.buf.slice(0..size))
                 .arg(&mut output.buf.slice_mut(0..size))
-                .launch(cfg);
+                .launch(cfg)
+                .map_err(CudaError::Driver)?;
         }
 
         Ok(())
@@ -384,41 +359,8 @@ impl Device for CudaDevice {
                 .arg(&target.buf.slice(0..size))
                 .arg(&output_grad.buf.slice(0..size))
                 .arg(&mut input_grad.buf.slice_mut(0..size))
-                .launch(cfg);
-        }
-
-        Ok(())
-    }
-
-    fn sparse_to_dense(
-        batch_size: usize,
-        size: usize,
-        nnz: usize,
-        sparse: &Self::BufferI32,
-        dense: &mut Self::BufferF32,
-    ) -> OperationResult<Self::DeviceError> {
-        if batch_size * nnz > sparse.size() || batch_size * size > dense.size() {
-            return Err(OperationError::IndexOutOfBounds);
-        }
-
-        dense.set_zero()?;
-
-        let func = sparse.device.module.load_function("sparse_to_dense").unwrap();
-        let threads = batch_size.min(1024);
-        let blocks = batch_size.div_ceil(threads) as u32;
-        let cfg = LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (threads as u32, 1, 1), shared_mem_bytes: 0 };
-
-        unsafe {
-            sparse
-                .device
-                .stream
-                .launch_builder(&func)
-                .arg(&(size as i32))
-                .arg(&(batch_size as i32))
-                .arg(&(nnz as i32))
-                .arg(&sparse.buf)
-                .arg(&mut dense.buf)
-                .launch(cfg);
+                .launch(cfg)
+                .map_err(CudaError::Driver)?;
         }
 
         Ok(())
