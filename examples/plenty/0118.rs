@@ -10,6 +10,7 @@ use bullet_lib::default::inputs;
 use bullet_lib::default::inputs::Chess768;
 use bullet_lib::default::inputs::Factorised;
 use bullet_lib::default::inputs::Factorises;
+use bullet_lib::default::inputs::SparseInputType;
 use bullet_lib::game::outputs::MaterialCount;
 use bullet_lib::lr;
 use bullet_lib::lr::LrScheduler;
@@ -866,8 +867,7 @@ fn make_trainer()
             }
         })
         .save_format(&[
-            SavedFormat::id("l0f"),
-            SavedFormat::id("l0w"),
+            SavedFormat::id("l0w").add_transform(move |_, _, w| inputs.merge_factoriser(w)),
             SavedFormat::id("l0b"),
             SavedFormat::id("l1w"),
             SavedFormat::id("l1b"),
@@ -877,14 +877,8 @@ fn make_trainer()
             SavedFormat::id("l3b"),
         ])
         .build(|builder, stm, ntm, buckets| {
-            // Build fast factoriser
-            let mut l0 = builder.new_affine("l0", TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
-
-            let l0f = builder.new_weights("l0f", Shape::new(L1_SIZE, 768), InitSettings::Zeroed);
-            let l0f_padding = builder.new_constant(Shape::new(TOTAL_THREATS, 768), &[0.0; TOTAL_THREATS * 768]);
-            l0.weights = l0.weights + l0f_padding.concat(l0f.repeat(KING_BUCKETS));
-
             // Build layers
+            let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
             let l1 = builder.new_affine("l1", 2 * L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE, OUTPUT_BUCKETS);
