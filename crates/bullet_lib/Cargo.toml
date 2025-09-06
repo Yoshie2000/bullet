@@ -156,6 +156,18 @@ name = "0109rrr2"
 path = "../../examples/plenty/0109rrr2.rs"
 
 [[example]]
+name = "0109rrr3"
+path = "../../examples/plenty/0109rrr3.rs"
+
+[[example]]
+name = "0109rrr4"
+path = "../../examples/plenty/0109rrr4.rs"
+
+[[example]]
+name = "0109rrr5"
+path = "../../examples/plenty/0109rrr5.rs"
+
+[[example]]
 name = "0109rr2r"
 path = "../../examples/plenty/0109rr2r.rs"
 
@@ -178,6 +190,18 @@ path = "../../examples/plenty/0113.rs"
 [[example]]
 name = "0114"
 path = "../../examples/plenty/0114.rs"
+
+[[example]]
+name = "0115"
+path = "../../examples/plenty/0115.rs"
+
+[[example]]
+name = "0117"
+path = "../../examples/plenty/0117.rs"
+
+[[example]]
+name = "0117rr2r"
+path = "../../examples/plenty/0117rr2r.rs"
 
 [[example]]
 name = "threats-kingbuckets"
