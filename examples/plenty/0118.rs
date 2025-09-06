@@ -1,16 +1,11 @@
-use bullet_core::graph::builder::InitSettings;
 use bullet_core::optimiser::adam::AdamW;
 use bullet_lib::ExecutionContext;
 use bullet_lib::LocalSettings;
-use bullet_lib::Shape;
 use bullet_lib::TrainingSchedule;
 use bullet_lib::TrainingSteps;
 use bullet_lib::default::formats::bulletformat::ChessBoard;
 use bullet_lib::default::inputs;
 use bullet_lib::default::inputs::Chess768;
-use bullet_lib::default::inputs::Factorised;
-use bullet_lib::default::inputs::Factorises;
-use bullet_lib::default::inputs::SparseInputType;
 use bullet_lib::game::outputs::MaterialCount;
 use bullet_lib::lr;
 use bullet_lib::lr::LrScheduler;
@@ -608,7 +603,7 @@ impl inputs::SparseInputType for ThreatInputs {
     }
 
     fn max_active(&self) -> usize {
-        128
+        128 + 32
     }
 
     fn map_features<F: FnMut(usize, usize)>(&self, pos: &Self::RequiredDataType, mut f: F) {
@@ -751,11 +746,11 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
     type RequiredDataType = ChessBoard;
 
     fn num_inputs(&self) -> usize {
-        TOTAL_THREATS + 768 * self.num_buckets
+        768 + TOTAL_THREATS + 768 * self.num_buckets
     }
 
     fn max_active(&self) -> usize {
-        128
+        128 + 32 // integrated factoriser
     }
 
     fn map_features<F: FnMut(usize, usize)>(&self, pos: &Self::RequiredDataType, mut f: F) {
@@ -763,7 +758,9 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
         let (stm_flip, stm_bucket) = get(pos.our_ksq());
         let (ntm_flip, ntm_bucket) = get(pos.opp_ksq());
         Chess768.map_features(pos, |stm, ntm| {
-            f(TOTAL_THREATS + stm_bucket + (stm ^ stm_flip), TOTAL_THREATS + ntm_bucket + (ntm ^ ntm_flip))
+            let bucketed_offset = 768 + TOTAL_THREATS;
+            f(bucketed_offset + stm_bucket + (stm ^ stm_flip), bucketed_offset + ntm_bucket + (ntm ^ ntm_flip)); // bucketed feature
+            f(stm ^ stm_flip, ntm ^ ntm_flip) // factorised feature
         });
 
         let mut bbs = [0; 8];
@@ -797,7 +794,7 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
         assert_eq!(stm_count, ntm_count);
 
         for (&stm, &ntm) in stm_feats.iter().zip(ntm_feats.iter()).take(stm_count) {
-            f(stm, ntm);
+            f(768 + stm, 768 + ntm); // factoriser offset
         }
     }
 
@@ -806,20 +803,8 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
     }
 
     fn description(&self) -> String {
-        "Threat inputs bucketed mirrored".to_string()
+        "Threat inputs bucketed mirrored factorised".to_string()
     }
-}
-
-impl Factorises<ThreatInputsBucketsMirrored> for Chess768 {
-    fn derive_feature(&self, _: &ThreatInputsBucketsMirrored, feat: usize) -> Option<usize> {
-        if feat >= TOTAL_THREATS { Some((feat - TOTAL_THREATS) % 768) } else { None }
-    }
-}
-
-type ThreatInputsFactorisedBucketsMirrored = Factorised<ThreatInputsBucketsMirrored, Chess768>;
-
-fn new_threat_inputs_factorised_buckets_mirrored(buckets: [usize; 32]) -> ThreatInputsFactorisedBucketsMirrored {
-    ThreatInputsFactorisedBucketsMirrored::from_parts(ThreatInputsBucketsMirrored::new(buckets), Chess768)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------
@@ -833,9 +818,9 @@ struct NetConfig<'a> {
 const TRAINING_DIR: &str = "/mnt/d/Chess Data/Selfgen/Training";
 
 fn make_trainer()
--> ValueTrainer<AdamW<ExecutionContext>, Factorised<ThreatInputsBucketsMirrored, Chess768>, MaterialCount<8>> {
+-> ValueTrainer<AdamW<ExecutionContext>, ThreatInputsBucketsMirrored, MaterialCount<8>> {
     #[rustfmt::skip]
-    let inputs = new_threat_inputs_factorised_buckets_mirrored([
+    let inputs = ThreatInputsBucketsMirrored::new([
             00, 01, 02, 03,
             04, 05, 06, 07,
             08, 08, 09, 09,
@@ -957,7 +942,7 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
         },
         wdl_scheduler: wdl_scheduler,
         lr_scheduler: lr_scheduler,
-        save_rate: 1,
+        save_rate: 100,
     };
 
     trainer.optimiser.set_params(optimiser::AdamWParams {
