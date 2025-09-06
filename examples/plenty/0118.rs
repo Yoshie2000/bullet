@@ -867,7 +867,7 @@ fn make_trainer()
             }
         })
         .save_format(&[
-            SavedFormat::id("l0w").add_transform(move |_, _, w| inputs.merge_factoriser(w)),
+            SavedFormat::id("l0w"),
             SavedFormat::id("l0b"),
             SavedFormat::id("l1w"),
             SavedFormat::id("l1b"),
@@ -881,7 +881,7 @@ fn make_trainer()
             let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
             let l1 = builder.new_affine("l1", 2 * L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
-            let l3 = builder.new_affine("l3", L3_SIZE, OUTPUT_BUCKETS);
+            let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
 
             // Crelu + Pairwise
             let stm_subnet = l0.forward(stm).crelu();
@@ -893,7 +893,7 @@ fn make_trainer()
             let l1_out = l1_out.crelu();
             // L2 + L3 forward
             let l2_out = l2.forward(l1_out).select(buckets).screlu();
-            let l3_out = l3.forward(l2_out).select(buckets);
+            let l3_out = l3.forward(l2_out.concat(l1_out)).select(buckets);
 
             l3_out
         });
