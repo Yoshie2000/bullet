@@ -832,7 +832,7 @@ fn make_trainer()
         ]);
     const KING_BUCKETS: usize = 12;
     const OUTPUT_BUCKETS: usize = 8;
-    const L1_SIZE: usize = 384;
+    const L1_SIZE: usize = 512;
     const L2_SIZE: usize = 16;
     const L3_SIZE: usize = 32;
 
@@ -864,13 +864,13 @@ fn make_trainer()
         .build(|builder, stm, ntm, buckets| {
             // Build layers
             let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
-            let l1 = builder.new_affine("l1", 2 * L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
+            let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
 
             // Crelu + Pairwise
-            let stm_subnet = l0.forward(stm).crelu();
-            let ntm_subnet = l0.forward(ntm).crelu();
+            let stm_subnet = l0.forward(stm).crelu().pairwise_mul();
+            let ntm_subnet = l0.forward(ntm).crelu().pairwise_mul();
             let pairwise_out = stm_subnet.concat(ntm_subnet);
             // Dual activation
             let l1_out = l1.forward(pairwise_out).select(buckets);
@@ -942,7 +942,7 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
         },
         wdl_scheduler: wdl_scheduler,
         lr_scheduler: lr_scheduler,
-        save_rate: 1,
+        save_rate: 100,
     };
 
     trainer.optimiser.set_params(optimiser::AdamWParams {
@@ -964,7 +964,7 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/20ksn-plentyChonker.data",
         wdl::ConstantWDL { value: 0.15 },
         lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0120", superbatch: 300 },
+        NetConfig { name: "0123", superbatch: 300 },
         None,
     );
 
@@ -973,8 +973,8 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/5ksn.data",
         wdl::ConstantWDL { value: 0.3 },
         lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0120r", superbatch: 300 },
-        Some(NetConfig { name: "0120", superbatch: 300 }),
+        NetConfig { name: "0123r", superbatch: 300 },
+        Some(NetConfig { name: "0123", superbatch: 300 }),
     );
 
     // Step 3
@@ -982,8 +982,8 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/20ksn.data",
         wdl::ConstantWDL { value: 0.6 },
         lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0120rr", superbatch: 400 },
-        Some(NetConfig { name: "0120r", superbatch: 300 }),
+        NetConfig { name: "0123rr", superbatch: 400 },
+        Some(NetConfig { name: "0123r", superbatch: 300 }),
     );
 
     // Step 4
@@ -991,7 +991,7 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/20ksn-adversarial-plentychonker.data",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0120rrr", superbatch: 300 },
-        Some(NetConfig { name: "0120rr", superbatch: 400 }),
+        NetConfig { name: "0123rrr", superbatch: 300 },
+        Some(NetConfig { name: "0123rr", superbatch: 400 }),
     );
 }

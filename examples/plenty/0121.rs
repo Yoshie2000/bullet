@@ -17,7 +17,6 @@ use bullet_lib::value::loader::DirectSequentialDataLoader;
 use bullet_lib::wdl;
 use bullet_lib::wdl::WdlScheduler;
 use rand::Rng;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 macro_rules! init {
     (|$sq:ident, $size:literal | $($rest:tt)+) => {{
@@ -68,13 +67,22 @@ impl Piece {
 pub mod offsets {
     use super::indices;
 
-    pub const PAWN: usize = 0;
-    pub const KNIGHT: usize = PAWN + 6 * indices::PAWN; // pawn attacks: 6 different pieces: own pawn, own knight, own rook, opp pawn, opp knight, opp rook
-    pub const BISHOP: usize = KNIGHT + 12 * indices::KNIGHT[64]; // knight attacks: all 12 pieces possible
-    pub const ROOK: usize = BISHOP + 10 * indices::BISHOP[64]; // bishop attacks: queens are skipped
-    pub const QUEEN: usize = ROOK + 10 * indices::ROOK[64]; // rook attacks: queens are skipped
-    pub const KING: usize = QUEEN + 12 * indices::QUEEN[64]; // queen attacks: all 12 pieces possible
-    pub const END: usize = KING + 8 * indices::KING[64]; // king attacks: queen and king skipped
+    pub const PAWN: usize                = 0;
+    pub const KNIGHT: usize              = PAWN + 6 * indices::PAWN; // pawn attacks: 6 different pieces: own pawn, own knight, own rook, opp pawn, opp knight, opp rook
+    pub const BISHOP: usize              = KNIGHT + 12 * indices::KNIGHT[64]; // knight attacks: all 12 pieces possible
+    pub const ROOK: usize                = BISHOP + 10 * indices::BISHOP[64]; // bishop attacks: queens are skipped
+    pub const QUEEN: usize               = ROOK + 10 * indices::ROOK[64]; // rook attacks: queens are skipped
+    pub const KING: usize                = QUEEN + 12 * indices::QUEEN[64]; // queen attacks: all 12 pieces possible
+    pub const END: usize                 = KING + 8 * indices::KING[64]; // king attacks: queen and king skipped
+    
+    // factorise by [target_higher_value][enemy]
+    // for king, target_higher_value is always false
+    pub const KNIGHT_FACTORISED: usize   = PAWN + 4 * indices::PAWN; 
+    pub const BISHOP_FACTORISED: usize   = KNIGHT + 4 * indices::KNIGHT[64]; 
+    pub const ROOK_FACTORISED: usize     = BISHOP + 4 * indices::BISHOP[64];
+    pub const QUEEN_FACTORISED: usize    = ROOK + 4 * indices::ROOK[64];
+    pub const KING_FACTORISED: usize     = QUEEN + 4 * indices::QUEEN[64];
+    pub const END_FACTORISED: usize      = KING + 2 * indices::KING[64];
 }
 
 pub mod indices {
@@ -351,30 +359,9 @@ pub const fn line_through(i: usize, j: usize) -> u64 {
 }
 
 const TOTAL_THREATS: usize = 2 * offsets::END;
-const TOTAL: usize = TOTAL_THREATS + 768;
+const TOTAL_THREATS_FACTORISED: usize = 2 * offsets::END_FACTORISED;
 
-static COUNT: AtomicUsize = AtomicUsize::new(0);
-static SQRED: AtomicUsize = AtomicUsize::new(0);
-static EVALS: AtomicUsize = AtomicUsize::new(0);
-static MAX: AtomicUsize = AtomicUsize::new(0);
-const TRACK: bool = false;
-
-pub fn print_feature_stats() {
-    let count = COUNT.load(Ordering::Relaxed);
-    let sqred = SQRED.load(Ordering::Relaxed);
-    let evals = EVALS.load(Ordering::Relaxed);
-    let max = MAX.load(Ordering::Relaxed);
-
-    let mean = count as f64 / evals as f64;
-    let var = sqred as f64 / evals as f64 - mean.powi(2);
-    let pct = 1.96 * var.sqrt();
-
-    println!("Total Evals: {evals}");
-    println!("Maximum Active Features: {max}");
-    println!("Active Features: {mean:.3} +- {pct:.3} (95%)");
-}
-
-pub fn map_piece_threat(
+pub fn map_piece_threat<const F: bool>(
     // maps a threat to a feature index (still need to add half width in case of nstm)
     piece: usize,  // piece type
     src: usize,    // square of piece type
@@ -383,12 +370,12 @@ pub fn map_piece_threat(
     enemy: bool,   // indicates whether "target" is an enemy piece (threat or protection)
 ) -> Option<usize> {
     match piece {
-        Piece::PAWN => map_pawn_threat(src, dest, target, enemy),
-        Piece::KNIGHT => map_knight_threat(src, dest, target),
-        Piece::BISHOP => map_bishop_threat(src, dest, target),
-        Piece::ROOK => map_rook_threat(src, dest, target),
-        Piece::QUEEN => map_queen_threat(src, dest, target),
-        Piece::KING => map_king_threat(src, dest, target),
+        Piece::PAWN => map_pawn_threat::<F>(src, dest, target, enemy),
+        Piece::KNIGHT => map_knight_threat::<F>(src, dest, target),
+        Piece::BISHOP => map_bishop_threat::<F>(src, dest, target),
+        Piece::ROOK => map_rook_threat::<F>(src, dest, target),
+        Piece::QUEEN => map_queen_threat::<F>(src, dest, target),
+        Piece::KING => map_king_threat::<F>(src, dest, target),
         _ => unreachable!(),
     }
 }
@@ -410,15 +397,29 @@ const fn offset_mapping<const N: usize>(a: [usize; N]) -> [usize; 12] {
     res
 }
 
+const fn offset_mapping_factorised<const N: usize, const P: usize>(a: [usize; N]) -> [usize; 12] {
+    let mut res = [usize::MAX; 12];
+
+    let mut i = 0;
+    while i < N {
+        res[a[i] - 2] = (a[i] > P) as usize;
+        res[a[i] + 4] = if P == Piece::KING { 1 } else { 2 } + (a[i] > P) as usize;
+        i += 1;
+    }
+
+    res
+}
+
 fn target_is(target: usize, piece: usize) -> bool {
     target % 6 == piece - 2
 }
 
-fn map_pawn_threat(src: usize, dest: usize, target: usize, enemy: bool) -> Option<usize> {
-    // target is still a colored piece
-    const MAP: [usize; 12] = offset_mapping([Piece::PAWN, Piece::KNIGHT, Piece::ROOK]);
-    // this MAP call results in the following array:
+fn map_pawn_threat<const F: bool>(src: usize, dest: usize, target: usize, enemy: bool) -> Option<usize> {
     // [0, 1, MAX, 2, MAX, MAX, 3, 4, MAX, 5, MAX, MAX]
+    const MAP_FULL: [usize; 12] = offset_mapping([Piece::PAWN, Piece::KNIGHT, Piece::ROOK]);
+    // [0, 1, MAX, 1, MAX, MAX, 2, 3, MAX, 3, MAX, MAX] => factorises based on "target piece worth more than me"
+    const MAP_FACTORISED: [usize; 12] = offset_mapping_factorised::<3, 2>([Piece::PAWN, Piece::KNIGHT, Piece::ROOK]);
+    let MAP = if !F { MAP_FULL } else { MAP_FACTORISED };
 
     // pawn <-> bishop threats are covered by the bishop attacking the pawn, same for queen
     // for pawn <-> pawn threats, we don't cover cases where dest > src to avoid duplicates
@@ -429,86 +430,123 @@ fn map_pawn_threat(src: usize, dest: usize, target: usize, enemy: bool) -> Optio
         let up = usize::from(dest > src);
         let diff = dest.abs_diff(src);
         let id = if diff == [9, 7][up] { 0 } else { 1 };
-        let attack = 2 * (src % 8) + id - 1;
-        let threat = offsets::PAWN + MAP[target] * indices::PAWN + (src / 8 - 1) * 14 + attack;
+        let attack = 2 * (src % 8) + id - 1; // [0, 14] => represents file + attack direction
+        let threat = offsets::PAWN + MAP[target] * indices::PAWN + (src / 8 - 1) * 14 + attack; // 6 possible ranks => 84 square / attack direction combos
 
-        assert!(threat < offsets::KNIGHT, "{threat}");
+        assert!(threat < if !F { offsets::KNIGHT } else { offsets::KNIGHT_FACTORISED }, "{threat}");
 
         Some(threat)
     }
 }
 
-fn map_knight_threat(src: usize, dest: usize, target: usize) -> Option<usize> {
+fn map_knight_threat<const F: bool>(src: usize, dest: usize, target: usize) -> Option<usize> {
+    // [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    const MAP_FULL: [usize; 12] = offset_mapping([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK, Piece::QUEEN, Piece::KING]);
+    // [0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 3, 3] => factorises based on "target piece worth more than me"
+    const MAP_FACTORISED: [usize; 12] = offset_mapping_factorised::<6, 3>([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK, Piece::QUEEN, Piece::KING]);
+    let MAP = if !F { MAP_FULL } else { MAP_FACTORISED };
+
     // don't duplicate knight threats, only allow where dest < src
     if dest > src && target_is(target, Piece::KNIGHT) {
         None
     } else {
-        let idx = indices::KNIGHT[src] + below(src, dest, &attacks::KNIGHT);
-        let threat = offsets::KNIGHT + target * indices::KNIGHT[64] + idx;
+        let BEGIN_OFFSET = if !F { offsets::KNIGHT } else { offsets::KNIGHT_FACTORISED };
 
-        assert!(threat >= offsets::KNIGHT, "{threat}");
-        assert!(threat < offsets::BISHOP, "{threat}");
+        let idx = indices::KNIGHT[src] + below(src, dest, &attacks::KNIGHT);
+        let threat = BEGIN_OFFSET + MAP[target] * indices::KNIGHT[64] + idx;
+
+        assert!(threat >= BEGIN_OFFSET, "{threat}");
+        assert!(threat < if !F { offsets::BISHOP } else { offsets::BISHOP_FACTORISED }, "{threat}");
 
         Some(threat)
     }
 }
 
-fn map_bishop_threat(src: usize, dest: usize, target: usize) -> Option<usize> {
-    const MAP: [usize; 12] = offset_mapping([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK, Piece::KING]);
+fn map_bishop_threat<const F: bool>(src: usize, dest: usize, target: usize) -> Option<usize> {
+    // [0, 1, 2, 3, MAX, 4, 5, 6, 7, 8, MAX, 9]
+    const MAP_FULL: [usize; 12] = offset_mapping([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK, Piece::KING]);
+    // [0, 0, 1, 1, 1, MAX, 2, 2, 3, 3, 3, MAX] => factorises based on "target piece worth more than me"
+    const MAP_FACTORISED: [usize; 12] = offset_mapping_factorised::<5, 4>([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK, Piece::KING]);
+    let MAP = if !F { MAP_FULL } else { MAP_FACTORISED };
+
     // queen attacks bishop => bishop attacks queen, so ont used here
     if MAP[target] == usize::MAX || dest > src && target_is(target, Piece::BISHOP) {
         None
     } else {
-        let idx = indices::BISHOP[src] + below(src, dest, &attacks::BISHOP);
-        let threat = offsets::BISHOP + MAP[target] * indices::BISHOP[64] + idx;
+        let BEGIN_OFFSET = if !F { offsets::BISHOP } else { offsets::BISHOP_FACTORISED };
 
-        assert!(threat >= offsets::BISHOP, "{threat}");
-        assert!(threat < offsets::ROOK, "{threat}");
+        let idx = indices::BISHOP[src] + below(src, dest, &attacks::BISHOP);
+        let threat = BEGIN_OFFSET + MAP[target] * indices::BISHOP[64] + idx;
+
+        assert!(threat >= BEGIN_OFFSET, "{threat}");
+        assert!(threat < if !F { offsets::ROOK } else { offsets::ROOK_FACTORISED }, "{threat}");
 
         Some(threat)
     }
 }
 
-fn map_rook_threat(src: usize, dest: usize, target: usize) -> Option<usize> {
-    const MAP: [usize; 12] = offset_mapping([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK, Piece::KING]);
+fn map_rook_threat<const F: bool>(src: usize, dest: usize, target: usize) -> Option<usize> {
+    // [0, 1, 2, 3, MAX, 4, 5, 6, 7, 8, MAX, 9]
+    const MAP_FULL: [usize; 12] = offset_mapping([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK, Piece::KING]);
+    // [0, 0, 0, 0, MAX, 1, 2, 2, 2, 2, MAX, 3] => factorises based on "target piece worth more than me"
+    const MAP_FACTORISED: [usize; 12] = offset_mapping_factorised::<5, 5>([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK, Piece::KING]);
+    let MAP = if !F { MAP_FULL } else { MAP_FACTORISED };
+
     if MAP[target] == usize::MAX || dest > src && target_is(target, Piece::ROOK) {
         None
     } else {
-        let idx = indices::ROOK[src] + below(src, dest, &attacks::ROOK);
-        let threat = offsets::ROOK + MAP[target] * indices::ROOK[64] + idx;
+        let BEGIN_OFFSET = if !F { offsets::ROOK } else { offsets::ROOK_FACTORISED };
 
-        assert!(threat >= offsets::ROOK, "{threat}");
-        assert!(threat < offsets::QUEEN, "{threat}");
+        let idx = indices::ROOK[src] + below(src, dest, &attacks::ROOK);
+        let threat = BEGIN_OFFSET + MAP[target] * indices::ROOK[64] + idx;
+
+        assert!(threat >= BEGIN_OFFSET, "{threat}");
+        assert!(threat < if !F { offsets::QUEEN } else { offsets::QUEEN_FACTORISED }, "{threat}");
 
         Some(threat)
     }
 }
 
-fn map_queen_threat(src: usize, dest: usize, target: usize) -> Option<usize> {
+fn map_queen_threat<const F: bool>(src: usize, dest: usize, target: usize) -> Option<usize> {
+    // [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    const MAP_FULL: [usize; 12] = offset_mapping([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK, Piece::QUEEN, Piece::KING]);
+    // [0, 0, 0, 0, 0, 1, 2, 2, 2, 2, 2, 3] => factorises based on "target piece worth more than me"
+    const MAP_FACTORISED: [usize; 12] = offset_mapping_factorised::<6, 6>([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK, Piece::QUEEN, Piece::KING]);
+    let MAP = if !F { MAP_FULL } else { MAP_FACTORISED };
+
     if dest > src && target_is(target, Piece::QUEEN) {
         None
     } else {
-        let idx = indices::QUEEN[src] + below(src, dest, &attacks::QUEEN);
-        let threat = offsets::QUEEN + target * indices::QUEEN[64] + idx;
+        let BEGIN_OFFSET = if !F { offsets::QUEEN } else { offsets::QUEEN_FACTORISED };
 
-        assert!(threat >= offsets::QUEEN, "{threat}");
-        assert!(threat < offsets::KING, "{threat}");
+        let idx = indices::QUEEN[src] + below(src, dest, &attacks::QUEEN);
+        let threat = BEGIN_OFFSET + MAP[target] * indices::QUEEN[64] + idx;
+
+        assert!(threat >= BEGIN_OFFSET, "{threat}");
+        assert!(threat < if !F { offsets::KING } else { offsets::KING_FACTORISED }, "{threat}");
 
         Some(threat)
     }
 }
 
-fn map_king_threat(src: usize, dest: usize, target: usize) -> Option<usize> {
-    const MAP: [usize; 12] = offset_mapping([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK]);
+fn map_king_threat<const F: bool>(src: usize, dest: usize, target: usize) -> Option<usize> {
+    // [0, 1, 2, 3, MAX, MAX, 4, 5, 6, 7, MAX, MAX]
+    const MAP_FULL: [usize; 12] = offset_mapping([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK]);
+    // [0, 0, 0, 0, MAX, MAX, 1, 1, 1, 1, MAX, MAX] => factorises based on "target piece worth more than me"
+    const MAP_FACTORISED: [usize; 12] = offset_mapping_factorised::<4, 7>([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK]);
+    let MAP = if !F { MAP_FULL } else { MAP_FACTORISED };
+
     if MAP[target] == usize::MAX {
         None
     } else {
+        let BEGIN_OFFSET = if !F { offsets::KING } else { offsets::KING_FACTORISED };
+
         let idx = indices::KING[src] + below(src, dest, &attacks::KING);
         // piece offset + attacking piece offset + local index (made up of square offset + square-local index)
-        let threat = offsets::KING + MAP[target] * indices::KING[64] + idx;
+        let threat = BEGIN_OFFSET + MAP[target] * indices::KING[64] + idx;
 
-        assert!(threat >= offsets::KING, "{threat}");
-        assert!(threat < offsets::END, "{threat}");
+        assert!(threat >= BEGIN_OFFSET, "{threat}");
+        assert!(threat < if !F { offsets::END } else { offsets::END_FACTORISED }, "{threat}");
 
         Some(threat)
     }
@@ -531,127 +569,7 @@ fn flip_horizontal(mut bb: u64) -> u64 {
     ((bb >> 4) & K4) | ((bb & K4) << 4)
 }
 
-fn map_features<F: FnMut(usize)>(mut bbs: [u64; 8], mut f: F) {
-    // horiontal mirror
-    let ksq = (bbs[0] & bbs[Piece::KING]).trailing_zeros();
-    if ksq % 8 > 3 {
-        for bb in bbs.iter_mut() {
-            *bb = flip_horizontal(*bb);
-        }
-    };
-
-    let mut pieces = [13; 64];
-    for side in [Side::WHITE, Side::BLACK] {
-        for piece in Piece::PAWN..=Piece::KING {
-            let pc = 6 * side + piece - 2;
-            map_bb(bbs[side] & bbs[piece], |sq| pieces[sq] = pc);
-        }
-    }
-
-    let mut count = 0;
-
-    let occ = bbs[0] | bbs[1];
-
-    for side in [Side::WHITE, Side::BLACK] {
-        let side_offset = offsets::END * side;
-        let opps = bbs[side ^ 1];
-
-        for piece in Piece::PAWN..=Piece::KING {
-            map_bb(bbs[side] & bbs[piece], |sq| {
-                let threats = match piece {
-                    Piece::PAWN => Attacks::pawn(sq, side),
-                    Piece::KNIGHT => Attacks::knight(sq),
-                    Piece::BISHOP => Attacks::bishop(sq, occ),
-                    Piece::ROOK => Attacks::rook(sq, occ),
-                    Piece::QUEEN => Attacks::queen(sq, occ),
-                    Piece::KING => Attacks::king(sq),
-                    _ => unreachable!(),
-                } & occ;
-
-                f(TOTAL_THREATS + [0, 384][side] + 64 * (piece - 2) + sq);
-                count += 1;
-                map_bb(threats, |dest| {
-                    let enemy = (1 << dest) & opps > 0;
-                    if let Some(idx) = map_piece_threat(piece, sq, dest, pieces[dest], enemy) {
-                        f(side_offset + idx);
-                        count += 1;
-                    }
-                });
-            });
-        }
-    }
-
-    if TRACK {
-        COUNT.fetch_add(count, Ordering::Relaxed);
-        SQRED.fetch_add(count * count, Ordering::Relaxed);
-        let evals = EVALS.fetch_add(1, Ordering::Relaxed);
-        MAX.fetch_max(count, Ordering::Relaxed);
-
-        if (evals + 1) % (16384 * 6104) == 0 {
-            print_feature_stats();
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct ThreatInputs;
-impl inputs::SparseInputType for ThreatInputs {
-    type RequiredDataType = ChessBoard;
-
-    fn num_inputs(&self) -> usize {
-        TOTAL
-    }
-
-    fn max_active(&self) -> usize {
-        128 + 32
-    }
-
-    fn map_features<F: FnMut(usize, usize)>(&self, pos: &Self::RequiredDataType, mut f: F) {
-        let mut bbs = [0; 8];
-        for (pc, sq) in pos.into_iter() {
-            let pt = 2 + usize::from(pc & 7);
-            let c = usize::from(pc & 8 > 0);
-            let bit = 1 << sq;
-            bbs[c] |= bit;
-            bbs[pt] |= bit;
-        }
-
-        let mut stm_count = 0;
-        let mut stm_feats = [0; 128];
-        map_features(bbs, |stm| {
-            stm_feats[stm_count] = stm;
-            stm_count += 1;
-        });
-
-        bbs.swap(0, 1);
-        for bb in &mut bbs {
-            *bb = bb.swap_bytes();
-        }
-
-        let mut ntm_count = 0;
-        let mut ntm_feats = [0; 128];
-        map_features(bbs, |ntm| {
-            ntm_feats[ntm_count] = ntm;
-            ntm_count += 1;
-        });
-
-        assert_eq!(stm_count, ntm_count);
-
-        for (&stm, &ntm) in stm_feats.iter().zip(ntm_feats.iter()).take(stm_count) {
-            f(stm, ntm);
-        }
-    }
-
-    fn shorthand(&self) -> String {
-        format!("{TOTAL}")
-    }
-
-    fn description(&self) -> String {
-        "Threat inputs".to_string()
-    }
-}
-
-fn map_features_bucketed<F: FnMut(usize)>(mut bbs: [u64; 8], mut f: F) {
+fn map_features_bucketed<const FAC: bool, F: FnMut(usize)>(mut bbs: [u64; 8], mut f: F) {
     // horiontal mirror
     let ksq = (bbs[0] & bbs[Piece::KING]).trailing_zeros();
     if ksq % 8 > 3 {
@@ -691,23 +609,12 @@ fn map_features_bucketed<F: FnMut(usize)>(mut bbs: [u64; 8], mut f: F) {
                 count += 1;
                 map_bb(threats, |dest| {
                     let enemy = (1 << dest) & opps > 0;
-                    if let Some(idx) = map_piece_threat(piece, sq, dest, pieces[dest], enemy) {
+                    if let Some(idx) = map_piece_threat::<FAC>(piece, sq, dest, pieces[dest], enemy) {
                         f(side_offset + idx);
                         count += 1;
                     }
                 });
             });
-        }
-    }
-
-    if TRACK {
-        COUNT.fetch_add(count, Ordering::Relaxed);
-        SQRED.fetch_add(count * count, Ordering::Relaxed);
-        let evals = EVALS.fetch_add(1, Ordering::Relaxed);
-        MAX.fetch_max(count, Ordering::Relaxed);
-
-        if (evals + 1) % (16384 * 6104) == 0 {
-            print_feature_stats();
         }
     }
 }
@@ -746,11 +653,11 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
     type RequiredDataType = ChessBoard;
 
     fn num_inputs(&self) -> usize {
-        768 + TOTAL_THREATS + 768 * self.num_buckets
+        (768 + TOTAL_THREATS_FACTORISED) + (TOTAL_THREATS + 768 * self.num_buckets)
     }
 
     fn max_active(&self) -> usize {
-        128 + 32 // integrated factoriser
+        2 * 128 // integrated factoriser
     }
 
     fn map_features<F: FnMut(usize, usize)>(&self, pos: &Self::RequiredDataType, mut f: F) {
@@ -758,7 +665,7 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
         let (stm_flip, stm_bucket) = get(pos.our_ksq());
         let (ntm_flip, ntm_bucket) = get(pos.opp_ksq());
         Chess768.map_features(pos, |stm, ntm| {
-            let bucketed_offset = 768 + TOTAL_THREATS;
+            let bucketed_offset = 768 + TOTAL_THREATS_FACTORISED + TOTAL_THREATS;
             f(bucketed_offset + stm_bucket + (stm ^ stm_flip), bucketed_offset + ntm_bucket + (ntm ^ ntm_flip)); // bucketed feature
             f(stm ^ stm_flip, ntm ^ ntm_flip) // factorised feature
         });
@@ -774,9 +681,15 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
 
         let mut stm_count = 0;
         let mut stm_feats = [0; 128];
-        map_features_bucketed(bbs, |stm| {
+        map_features_bucketed::<false, _>(bbs, |stm| {
             stm_feats[stm_count] = stm;
             stm_count += 1;
+        });
+        let mut stm_fac_count = 0;
+        let mut stm_fac_feats = [0; 128];
+        map_features_bucketed::<true, _>(bbs, |stm| {
+            stm_fac_feats[stm_fac_count] = stm;
+            stm_fac_count += 1;
         });
 
         bbs.swap(0, 1);
@@ -786,14 +699,23 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
 
         let mut ntm_count = 0;
         let mut ntm_feats = [0; 128];
-        map_features_bucketed(bbs, |ntm| {
+        map_features_bucketed::<false, _>(bbs, |ntm| {
             ntm_feats[ntm_count] = ntm;
             ntm_count += 1;
+        });
+        let mut ntm_fac_count = 0;
+        let mut ntm_fac_feats = [0; 128];
+        map_features_bucketed::<true, _>(bbs, |ntm| {
+            ntm_fac_feats[ntm_fac_count] = ntm;
+            ntm_fac_count += 1;
         });
 
         assert_eq!(stm_count, ntm_count);
 
         for (&stm, &ntm) in stm_feats.iter().zip(ntm_feats.iter()).take(stm_count) {
+            f(768 + TOTAL_THREATS_FACTORISED + stm, 768 + TOTAL_THREATS_FACTORISED + ntm);
+        }
+        for (&stm, &ntm) in stm_fac_feats.iter().zip(ntm_fac_feats.iter()).take(stm_fac_count) {
             f(768 + stm, 768 + ntm); // factoriser offset
         }
     }
@@ -863,7 +785,7 @@ fn make_trainer()
         ])
         .build(|builder, stm, ntm, buckets| {
             // Build layers
-            let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
+            let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS_FACTORISED + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
             let l1 = builder.new_affine("l1", 2 * L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
@@ -964,7 +886,7 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/20ksn-plentyChonker.data",
         wdl::ConstantWDL { value: 0.15 },
         lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0120", superbatch: 300 },
+        NetConfig { name: "0121", superbatch: 300 }, // 0.005484 vs. 0.006004
         None,
     );
 
@@ -973,8 +895,8 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/5ksn.data",
         wdl::ConstantWDL { value: 0.3 },
         lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0120r", superbatch: 300 },
-        Some(NetConfig { name: "0120", superbatch: 300 }),
+        NetConfig { name: "0121r", superbatch: 300 },
+        Some(NetConfig { name: "0121", superbatch: 300 }),
     );
 
     // Step 3
@@ -982,8 +904,8 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/20ksn.data",
         wdl::ConstantWDL { value: 0.6 },
         lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0120rr", superbatch: 400 },
-        Some(NetConfig { name: "0120r", superbatch: 300 }),
+        NetConfig { name: "0121rr", superbatch: 400 },
+        Some(NetConfig { name: "0121r", superbatch: 300 }),
     );
 
     // Step 4
@@ -991,7 +913,7 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/20ksn-adversarial-plentychonker.data",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0120rrr", superbatch: 300 },
-        Some(NetConfig { name: "0120rr", superbatch: 400 }),
+        NetConfig { name: "0121rrr", superbatch: 300 },
+        Some(NetConfig { name: "0121rr", superbatch: 400 }),
     );
 }

@@ -832,7 +832,7 @@ fn make_trainer()
         ]);
     const KING_BUCKETS: usize = 12;
     const OUTPUT_BUCKETS: usize = 8;
-    const L1_SIZE: usize = 384;
+    const L1_SIZE: usize = 512;
     const L2_SIZE: usize = 16;
     const L3_SIZE: usize = 32;
 
@@ -942,7 +942,7 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
         },
         wdl_scheduler: wdl_scheduler,
         lr_scheduler: lr_scheduler,
-        save_rate: 1,
+        save_rate: 100,
     };
 
     trainer.optimiser.set_params(optimiser::AdamWParams {
@@ -964,7 +964,7 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/20ksn-plentyChonker.data",
         wdl::ConstantWDL { value: 0.15 },
         lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0120", superbatch: 300 },
+        NetConfig { name: "0122", superbatch: 300 },
         None,
     );
 
@@ -973,8 +973,8 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/5ksn.data",
         wdl::ConstantWDL { value: 0.3 },
         lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0120r", superbatch: 300 },
-        Some(NetConfig { name: "0120", superbatch: 300 }),
+        NetConfig { name: "0122r", superbatch: 300 },
+        Some(NetConfig { name: "0122", superbatch: 300 }),
     );
 
     // Step 3
@@ -982,8 +982,8 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/20ksn.data",
         wdl::ConstantWDL { value: 0.6 },
         lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0120rr", superbatch: 400 },
-        Some(NetConfig { name: "0120r", superbatch: 300 }),
+        NetConfig { name: "0122rr", superbatch: 400 },
+        Some(NetConfig { name: "0122r", superbatch: 300 }),
     );
 
     // Step 4
@@ -991,7 +991,7 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/20ksn-adversarial-plentychonker.data",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0120rrr", superbatch: 300 },
-        Some(NetConfig { name: "0120rr", superbatch: 400 }),
+        NetConfig { name: "0122rrr", superbatch: 300 },
+        Some(NetConfig { name: "0122rr", superbatch: 400 }),
     );
 }
