@@ -1,4 +1,7 @@
+use std::str::FromStr;
+
 use bullet_core::optimiser::adam::AdamW;
+use bullet_lib::game::inputs::SparseInputType;
 use bullet_lib::ExecutionContext;
 use bullet_lib::LocalSettings;
 use bullet_lib::TrainingSchedule;
@@ -78,11 +81,11 @@ pub mod offsets {
     // factorise by [target_higher_value][enemy]
     // for king, target_higher_value is always false
     pub const KNIGHT_FACTORISED: usize   = PAWN + 4 * indices::PAWN; 
-    pub const BISHOP_FACTORISED: usize   = KNIGHT + 4 * indices::KNIGHT[64]; 
-    pub const ROOK_FACTORISED: usize     = BISHOP + 4 * indices::BISHOP[64];
-    pub const QUEEN_FACTORISED: usize    = ROOK + 4 * indices::ROOK[64];
-    pub const KING_FACTORISED: usize     = QUEEN + 4 * indices::QUEEN[64];
-    pub const END_FACTORISED: usize      = KING + 2 * indices::KING[64];
+    pub const BISHOP_FACTORISED: usize   = KNIGHT_FACTORISED + 4 * indices::KNIGHT[64]; 
+    pub const ROOK_FACTORISED: usize     = BISHOP_FACTORISED + 4 * indices::BISHOP[64];
+    pub const QUEEN_FACTORISED: usize    = ROOK_FACTORISED + 4 * indices::ROOK[64];
+    pub const KING_FACTORISED: usize     = QUEEN_FACTORISED + 4 * indices::QUEEN[64];
+    pub const END_FACTORISED: usize      = KING_FACTORISED + 2 * indices::KING[64];
 }
 
 pub mod indices {
@@ -465,7 +468,7 @@ fn map_knight_threat<const F: bool>(src: usize, dest: usize, target: usize) -> O
 fn map_bishop_threat<const F: bool>(src: usize, dest: usize, target: usize) -> Option<usize> {
     // [0, 1, 2, 3, MAX, 4, 5, 6, 7, 8, MAX, 9]
     const MAP_FULL: [usize; 12] = offset_mapping([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK, Piece::KING]);
-    // [0, 0, 1, 1, 1, MAX, 2, 2, 3, 3, 3, MAX] => factorises based on "target piece worth more than me"
+    // [0, 0, 0, 1, MAX, 1, 2, 2, 2, 3, MAX, 3] => factorises based on "target piece worth more than me"
     const MAP_FACTORISED: [usize; 12] = offset_mapping_factorised::<5, 4>([Piece::PAWN, Piece::KNIGHT, Piece::BISHOP, Piece::ROOK, Piece::KING]);
     let MAP = if !F { MAP_FULL } else { MAP_FACTORISED };
 
@@ -569,7 +572,12 @@ fn flip_horizontal(mut bb: u64) -> u64 {
     ((bb >> 4) & K4) | ((bb & K4) << 4)
 }
 
-fn map_features_bucketed<const FAC: bool, F: FnMut(usize)>(mut bbs: [u64; 8], mut f: F) {
+fn map_features_bucketed<const FAC: bool, F: FnMut(usize)>(input_bbs: [u64; 8], mut f: F) {
+    let mut bbs: [u64; 8] = [0; 8];
+    for i in 0..8 {
+        bbs[i] = input_bbs[i];
+    }
+
     // horiontal mirror
     let ksq = (bbs[0] & bbs[Piece::KING]).trailing_zeros();
     if ksq % 8 > 3 {
@@ -591,7 +599,7 @@ fn map_features_bucketed<const FAC: bool, F: FnMut(usize)>(mut bbs: [u64; 8], mu
     let occ = bbs[0] | bbs[1];
 
     for side in [Side::WHITE, Side::BLACK] {
-        let side_offset = offsets::END * side;
+        let side_offset = if !FAC { offsets::END * side } else { offsets::END_FACTORISED * side };
         let opps = bbs[side ^ 1];
 
         for piece in Piece::PAWN..=Piece::KING {
@@ -664,10 +672,17 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
         let get = |ksq| (if ksq % 8 > 3 { 7 } else { 0 }, 768 * self.buckets[usize::from(ksq)]);
         let (stm_flip, stm_bucket) = get(pos.our_ksq());
         let (ntm_flip, ntm_bucket) = get(pos.opp_ksq());
+
+        // Factorised psq features
+        // println!("Factorised PSQ Features (Start: 0, Limit: 768)");
         Chess768.map_features(pos, |stm, ntm| {
-            let bucketed_offset = 768 + TOTAL_THREATS_FACTORISED + TOTAL_THREATS;
-            f(bucketed_offset + stm_bucket + (stm ^ stm_flip), bucketed_offset + ntm_bucket + (ntm ^ ntm_flip)); // bucketed feature
-            f(stm ^ stm_flip, ntm ^ ntm_flip) // factorised feature
+            f(stm ^ stm_flip, ntm ^ ntm_flip);
+        });
+        // Bucketed psq features
+        let bucketed_offset = 768 + TOTAL_THREATS_FACTORISED + TOTAL_THREATS;
+        // println!("Bucketed PSQ Features (Start: {}/{}, Limit: 768)", bucketed_offset + stm_bucket, bucketed_offset + ntm_bucket);
+        Chess768.map_features(pos, |stm, ntm| {
+            f(bucketed_offset + stm_bucket + (stm ^ stm_flip), bucketed_offset + ntm_bucket + (ntm ^ ntm_flip));
         });
 
         let mut bbs = [0; 8];
@@ -712,11 +727,19 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
 
         assert_eq!(stm_count, ntm_count);
 
-        for (&stm, &ntm) in stm_feats.iter().zip(ntm_feats.iter()).take(stm_count) {
-            f(768 + TOTAL_THREATS_FACTORISED + stm, 768 + TOTAL_THREATS_FACTORISED + ntm);
-        }
+        // Factorised threat features
+        // println!("Factorised threat features (Start: 768, Limit: {})", TOTAL_THREATS_FACTORISED);
         for (&stm, &ntm) in stm_fac_feats.iter().zip(ntm_fac_feats.iter()).take(stm_fac_count) {
+            assert!(stm < TOTAL_THREATS_FACTORISED);
+            assert!(ntm < TOTAL_THREATS_FACTORISED);
             f(768 + stm, 768 + ntm); // factoriser offset
+        }
+        // Full threat features
+        // println!("Full threat features (Start: {}, Limit: {})", 768 + TOTAL_THREATS_FACTORISED, TOTAL_THREATS);
+        for (&stm, &ntm) in stm_feats.iter().zip(ntm_feats.iter()).take(stm_count) {
+            assert!(stm < TOTAL_THREATS);
+            assert!(ntm < TOTAL_THREATS);
+            f(768 + TOTAL_THREATS_FACTORISED + stm, 768 + TOTAL_THREATS_FACTORISED + ntm);
         }
     }
 
@@ -754,7 +777,7 @@ fn make_trainer()
         ]);
     const KING_BUCKETS: usize = 12;
     const OUTPUT_BUCKETS: usize = 8;
-    const L1_SIZE: usize = 384;
+    const L1_SIZE: usize = 512;
     const L2_SIZE: usize = 16;
     const L3_SIZE: usize = 32;
 
@@ -786,13 +809,13 @@ fn make_trainer()
         .build(|builder, stm, ntm, buckets| {
             // Build layers
             let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS_FACTORISED + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
-            let l1 = builder.new_affine("l1", 2 * L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
+            let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
 
             // Crelu + Pairwise
-            let stm_subnet = l0.forward(stm).crelu();
-            let ntm_subnet = l0.forward(ntm).crelu();
+            let stm_subnet = l0.forward(stm).crelu().pairwise_mul();
+            let ntm_subnet = l0.forward(ntm).crelu().pairwise_mul();
             let pairwise_out = stm_subnet.concat(ntm_subnet);
             // Dual activation
             let l1_out = l1.forward(pairwise_out).select(buckets);
@@ -881,12 +904,28 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
 }
 
 fn main() {
+    // let inputs = ThreatInputsBucketsMirrored::new([
+    //         00, 01, 02, 03,
+    //         04, 05, 06, 07,
+    //         08, 08, 09, 09,
+    //         10, 10, 10, 10,
+    //         11, 11, 11, 11,
+    //         11, 11, 11, 11,
+    //         11, 11, 11, 11,
+    //         11, 11, 11, 11,
+    //     ]);
+    
+    // let startpos = ChessBoard::from_str("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 | 0 | 0").unwrap();
+    // inputs.map_features(&startpos, |stm, ntm| {
+    //     println!("{} {}", stm, ntm);
+    // });
+
     // Step 1
     train(
         "/mnt/d/Chess Data/Selfgen/20ksn-plentyChonker.data",
         wdl::ConstantWDL { value: 0.15 },
         lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0121", superbatch: 300 }, // 0.005484 vs. 0.006004
+        NetConfig { name: "0124", superbatch: 300 }, // 0.005484 vs. 0.006004
         None,
     );
 
@@ -895,8 +934,8 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/5ksn.data",
         wdl::ConstantWDL { value: 0.3 },
         lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0121r", superbatch: 300 },
-        Some(NetConfig { name: "0121", superbatch: 300 }),
+        NetConfig { name: "0124r", superbatch: 300 },
+        Some(NetConfig { name: "0124", superbatch: 300 }),
     );
 
     // Step 3
@@ -904,8 +943,8 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/20ksn.data",
         wdl::ConstantWDL { value: 0.6 },
         lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0121rr", superbatch: 400 },
-        Some(NetConfig { name: "0121r", superbatch: 300 }),
+        NetConfig { name: "0124rr", superbatch: 400 },
+        Some(NetConfig { name: "0124r", superbatch: 300 }),
     );
 
     // Step 4
@@ -913,7 +952,7 @@ fn main() {
         "/mnt/d/Chess Data/Selfgen/20ksn-adversarial-plentychonker.data",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0121rrr", superbatch: 300 },
-        Some(NetConfig { name: "0121rr", superbatch: 400 }),
+        NetConfig { name: "0124rrr", superbatch: 300 },
+        Some(NetConfig { name: "0124rr", superbatch: 400 }),
     );
 }
