@@ -231,8 +231,36 @@ name = "0123"
 path = "../../examples/plenty/0123.rs"
 
 [[example]]
+name = "0123rrr2"
+path = "../../examples/plenty/0123rrr2.rs"
+
+[[example]]
+name = "0123rrr3"
+path = "../../examples/plenty/0123rrr3.rs"
+
+[[example]]
+name = "0123rrr4"
+path = "../../examples/plenty/0123rrr4.rs"
+
+[[example]]
 name = "0124"
 path = "../../examples/plenty/0124.rs"
+
+[[example]]
+name = "0125"
+path = "../../examples/plenty/0125.rs"
+
+[[example]]
+name = "0126"
+path = "../../examples/plenty/0126.rs"
+
+[[example]]
+name = "0126rrrr"
+path = "../../examples/plenty/0126rrrr.rs"
+
+[[example]]
+name = "0126rrr2"
+path = "../../examples/plenty/0126rrr2.rs"
 
 [[example]]
 name = "threats-kingbuckets"
