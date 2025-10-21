@@ -1,17 +1,20 @@
 use std::num::NonZeroUsize;
 
-use bullet_core::{
-    acyclib::graph::NodeId,
-    function::{DeviceFunction, MaybeUpdateBatchSize, Set},
+use acyclib::{
+    dag::NodeId,
+    device::{
+        function::{DeviceFunction, MaybeUpdateBatchSize, Set},
+        operation::DiffableFromOutput,
+        tensor::Shape,
+    },
     graph::{
         Graph, GraphNodeIdTy,
-        builder::Shape,
         ir::{
             GraphIR, GraphIRError, GraphIRMethods,
             node::AnnotatedNode,
             operation::{
                 GraphIROperationBase, GraphIROperationCompilable, GraphIROperationError, affine::Matmul,
-                sparse::SparseAffineActivate, unary::DiffableFromOutput, util,
+                sparse::SparseAffineActivate, util,
             },
             passes::{GraphIRSimplePass, downcast},
         },
@@ -126,7 +129,7 @@ impl GraphIROperationCompilable<CudaMarker> for SparseAffineUnaryMatmul {
 
         let indices = graph.get_ref(self.indices.idx, GraphNodeIdTy::Values);
         let borrow = indices.sparse();
-        let nnz = borrow.nnz;
+        let nnz = borrow.nnz();
         let batched = borrow.batch_size().is_some();
         drop(borrow);
 
@@ -206,7 +209,7 @@ impl GraphIROperationCompilable<CudaMarker> for SparseAffineUnaryMatmul {
         let out_weights_grad = graph.get_ref(self.out_weights.idx, GraphNodeIdTy::Gradients);
 
         let borrow = indices.sparse();
-        let nnz = borrow.nnz;
+        let nnz = borrow.nnz();
         let batched = borrow.batch_size().is_some();
         drop(borrow);
 

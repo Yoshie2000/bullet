@@ -13,22 +13,10 @@ jobs:
         - uses: actions/checkout@v4
         - uses: dtolnay/rust-toolchain@stable
           with:
-            component: clippy
+            components: clippy
         - run: cargo check --package acyclib
         - run: cargo clippy --package acyclib
         - run: cargo test --package acyclib
-
-  bullet_core:
-    name: bullet_core
-    runs-on: ubuntu-latest
-    steps:
-        - uses: actions/checkout@v4
-        - uses: dtolnay/rust-toolchain@stable
-          with:
-            component: clippy
-        - run: cargo check --package bullet_core
-        - run: cargo clippy --package bullet_core
-        - run: cargo test --package bullet_core
 
   bullet_hip_backend:
     name: bullet_hip_backend
@@ -37,7 +25,7 @@ jobs:
         - uses: actions/checkout@v4
         - uses: dtolnay/rust-toolchain@stable
           with:
-            component: clippy
+            components: clippy
         - run: cargo check --package bullet_hip_backend --features gh-actions
         - run: cargo clippy --package bullet_hip_backend --features gh-actions
 
@@ -48,7 +36,7 @@ jobs:
         - uses: actions/checkout@v4
         - uses: dtolnay/rust-toolchain@stable
           with:
-            component: clippy
+            components: clippy
         - run: cargo check --package bullet_lib --features cpu --no-default-features
         - run: cargo clippy --package bullet_lib --features cpu --no-default-features
         - run: cargo test --package bullet_lib --features cpu --no-default-features
@@ -60,7 +48,7 @@ jobs:
         - uses: actions/checkout@v4
         - uses: dtolnay/rust-toolchain@stable
           with:
-            component: clippy
+            components: clippy
         - run: cargo check --package bullet-utils
         - run: cargo clippy --package bullet-utils
         - run: cargo test --package bullet-utils
@@ -72,7 +60,7 @@ jobs:
         - uses: actions/checkout@v4
         - uses: dtolnay/rust-toolchain@stable
           with:
-            component: clippy
+            components: clippy
         - run: cargo check --examples --features cpu --no-default-features
         - run: cargo clippy --examples --features cpu --no-default-features
         - run: cargo test --examples --features cpu --no-default-features

@@ -1,11 +1,11 @@
-use bullet_core::optimiser::adam::AdamW;
-use bullet_lib::ExecutionContext;
+use acyclib::trainer::optimiser::adam::AdamW;
+use bullet_cuda_backend::CudaDevice;
 use bullet_lib::LocalSettings;
 use bullet_lib::TrainingSchedule;
 use bullet_lib::TrainingSteps;
-use bullet_lib::default::formats::bulletformat::ChessBoard;
-use bullet_lib::default::inputs;
-use bullet_lib::default::inputs::Chess768;
+use bullet_lib::game::inputs;
+use bullet_lib::game::inputs::Chess768;
+use bullet_lib::game::formats::bulletformat::ChessBoard;
 use bullet_lib::game::outputs::MaterialCount;
 use bullet_lib::lr;
 use bullet_lib::lr::LrScheduler;
@@ -818,7 +818,7 @@ struct NetConfig<'a> {
 const TRAINING_DIR: &str = "/mnt/d/Chess Data/Selfgen/Training";
 
 fn make_trainer()
--> ValueTrainer<AdamW<ExecutionContext>, ThreatInputsBucketsMirrored, MaterialCount<8>> {
+-> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored, MaterialCount<8>> {
     #[rustfmt::skip]
     let inputs = ThreatInputsBucketsMirrored::new([
             00, 01, 02, 03,
@@ -832,7 +832,7 @@ fn make_trainer()
         ]);
     const KING_BUCKETS: usize = 12;
     const OUTPUT_BUCKETS: usize = 8;
-    const L1_SIZE: usize = 640;
+    const L1_SIZE: usize = 1024;
     const L2_SIZE: usize = 16;
     const L3_SIZE: usize = 32;
 
@@ -942,7 +942,7 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
         },
         wdl_scheduler: wdl_scheduler,
         lr_scheduler: lr_scheduler,
-        save_rate: 100,
+        save_rate: 1,
     };
 
     trainer.optimiser.set_params(optimiser::AdamWParams {

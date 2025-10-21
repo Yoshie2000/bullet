@@ -15,15 +15,16 @@ cpu = []
 cuda = ["bullet_cuda_backend"]
 hip = ["bullet_hip_backend", "bullet_hip_backend/hip", "bullet_cuda_backend?/error"]
 hip-cuda = ["bullet_hip_backend"]
+multigpu = ["bullet_cuda_backend/nccl"]
 
 [dependencies]
+acyclib = { workspace = true }
 bullet_cuda_backend = { workspace = true, optional = true }
 bullet_hip_backend = { workspace = true, optional = true }
-bullet_core = { workspace = true }
 bulletformat = { workspace = true }
 montyformat = { workspace = true }
-sfbinpack = "0.4.1"
-viriformat = "2.0.0"
+sfbinpack = "0.6.0"
+viriformat = { workspace = true }
 regex = "1.11.1"
 rayon = "1.10.0"
 rand = "0.9.1"
@@ -261,6 +262,10 @@ path = "../../examples/plenty/0126rrrr.rs"
 [[example]]
 name = "0126rrr2"
 path = "../../examples/plenty/0126rrr2.rs"
+
+[[example]]
+name = "0126rrr3"
+path = "../../examples/plenty/0126rrr3.rs"
 
 [[example]]
 name = "threats-kingbuckets"

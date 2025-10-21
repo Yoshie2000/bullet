@@ -1,21 +1,19 @@
+mod base;
 mod blas;
 mod buffer;
 
 pub use blas::convert_gemm_config;
 pub use buffer::CudaBuffer;
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
-use bullet_core::{
-    device::{CoreDeviceOps, Device, DeviceBuffer, OperationError, OperationResult},
+use acyclib::{
+    device::{Device, DeviceBuffer, OperationError, OperationResult, operation::CoreDeviceOps},
     graph::ir::BackendMarker,
 };
 use cudarc::{
     cublas::{CudaBlas, result::CublasError},
-    driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DriverError, LaunchConfig, PushKernelArg},
+    driver::{CudaContext, CudaModule, CudaSlice, CudaStream, DriverError, LaunchConfig, PushKernelArg},
     nvrtc::{self, CompileError},
 };
 
@@ -27,6 +25,8 @@ pub enum CudaError {
     Driver(DriverError),
     Blas(CublasError),
     ExpectedIllegalAddressAccess,
+    #[cfg(feature = "nccl")]
+    Nccl(cudarc::nccl::result::NcclError),
 }
 
 #[derive(Debug)]
@@ -36,7 +36,6 @@ pub struct CudaDevice {
     module: Arc<CudaModule>,
     copystream: Arc<CudaStream>,
     ones: Mutex<CudaSlice<f32>>,
-    rtc: Mutex<HashMap<String, Arc<CudaModule>>>,
 }
 
 impl Default for CudaDevice {
@@ -62,28 +61,6 @@ impl CudaDevice {
         self.copystream.clone()
     }
 
-    /// # Safety
-    /// Function name collisions can cause UB.
-    pub unsafe fn get_custom_func_or_rtc<F: FnMut() -> String>(
-        &self,
-        name: &str,
-        mut f: F,
-    ) -> Result<CudaFunction, CudaError> {
-        let mut rtcs = self.rtc.try_lock().unwrap();
-
-        let module = if let Some(module) = rtcs.get(name) {
-            module.clone()
-        } else {
-            let kernel_str = f();
-            let ptx = nvrtc::compile_ptx(kernel_str).map_err(CudaError::RuntimeCompile)?;
-            let module = self.stream.context().load_module(ptx).map_err(CudaError::Driver)?;
-            rtcs.insert(name.to_string(), module.clone());
-            module
-        };
-
-        module.load_function("kernel").map_err(CudaError::Driver)
-    }
-
     pub fn with_ones<T, F: FnMut(&CudaSlice<f32>) -> Result<T, CudaError>>(
         self: Arc<Self>,
         count: usize,
@@ -94,7 +71,7 @@ impl CudaDevice {
         if count > ones.len() {
             *ones = self.stream.alloc_zeros(count).map_err(CudaError::Driver)?;
 
-            crate::base::set_to(self.clone(), &mut ones, count, 1.0).map_err(CudaError::Driver)?;
+            base::set_to(self.clone(), &mut ones, count, 1.0).map_err(CudaError::Driver)?;
         }
 
         f(&ones)
@@ -139,7 +116,7 @@ impl Device for CudaDevice {
 
         let ones = Mutex::new(stream.alloc_zeros::<f32>(0).map_err(CudaError::Driver)?);
 
-        Ok(Self { stream, blas, module, copystream, ones, rtc: Mutex::new(HashMap::new()) })
+        Ok(Self { stream, blas, module, copystream, ones })
     }
 
     fn synchronise(&self) -> Result<(), Self::DeviceError> {
