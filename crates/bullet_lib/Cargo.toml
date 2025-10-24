@@ -272,6 +272,10 @@ name = "0126rrr4"
 path = "../../examples/plenty/0126rrr4.rs"
 
 [[example]]
+name = "0126rrr5"
+path = "../../examples/plenty/0126rrr5.rs"
+
+[[example]]
 name = "threats-kingbuckets"
 path = "../../examples/plenty/threats-kingbuckets.rs"
 
