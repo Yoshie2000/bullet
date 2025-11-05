@@ -1,7 +1,5 @@
-use acyclib::trainer::optimiser::adam::AdamW;
+use acyclib::trainer::optimiser::ranger::Ranger;
 use bullet_cuda_backend::CudaDevice;
-use bullet_lib::nn::InitSettings;
-use bullet_lib::nn::Shape;
 use bullet_lib::LocalSettings;
 use bullet_lib::TrainingSchedule;
 use bullet_lib::TrainingSteps;
@@ -820,7 +818,7 @@ struct NetConfig<'a> {
 const TRAINING_DIR: &str = "/mnt/d/Chess Data/Selfgen/Training";
 
 fn make_trainer()
--> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored, MaterialCount<8>> {
+-> ValueTrainer<Ranger<CudaDevice>, ThreatInputsBucketsMirrored, MaterialCount<8>> {
     #[rustfmt::skip]
     let inputs = ThreatInputsBucketsMirrored::new([
             00, 01, 02, 03,
@@ -841,7 +839,7 @@ fn make_trainer()
     #[rustfmt::skip]
     return ValueTrainerBuilder::default()
         .dual_perspective()
-        .optimiser(optimiser::AdamW)
+        .optimiser(optimiser::Ranger)
         .loss_fn(|output, targets| output.sigmoid().squared_error(targets))
         .inputs(inputs)
         .output_buckets(MaterialCount::<OUTPUT_BUCKETS>)
@@ -854,8 +852,6 @@ fn make_trainer()
             }
         })
         .save_format(&[
-            SavedFormat::id("l0f"),
-            SavedFormat::id("l0t"),
             SavedFormat::id("l0w"),
             SavedFormat::id("l0b"),
             SavedFormat::id("l1w"),
@@ -867,17 +863,7 @@ fn make_trainer()
         ])
         .build(|builder, stm, ntm, buckets| {
             // Build layers
-            let init = InitSettings::Normal { mean: 0.0, stdev: (2.0 / (TOTAL_THREATS as f32)).sqrt() };
-            let l0f = builder.new_weights("l0f", Shape::new(L1_SIZE, 768), init);
-            let l0f = l0f.reshape(Shape::new(L1_SIZE * 768, 1));
-
-            let l0t = builder.new_weights("l0t", Shape::new(L1_SIZE, TOTAL_THREATS), init);
-            let l0t = l0t.reshape(Shape::new(L1_SIZE * TOTAL_THREATS, 1));
-
-            let mut l0 = builder.new_affine("l0", 768 * KING_BUCKETS, L1_SIZE);
-            l0.weights = l0f.concat(l0t).concat(l0.weights.reshape(Shape::new(L1_SIZE * 768 * KING_BUCKETS, 1)));
-            l0.weights = l0.weights.reshape(Shape::new(L1_SIZE, 768 + TOTAL_THREATS + 768 * KING_BUCKETS));
-
+            let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
             let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
@@ -920,9 +906,9 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
         if load_from_net.name != net.name {
             let _ = trainer
                 .optimiser
-                .load_weights_from_file(
+                .load_from_checkpoint(
                     format!(
-                        "/mnt/d/Chess Data/Selfgen/Training/{}/net-{}-{}/optimiser_state/weights.bin",
+                        "/mnt/d/Chess Data/Selfgen/Training/{}/net-{}-{}/optimiser_state",
                         load_from_net.name, load_from_net.name, load_from_net.superbatch
                     )
                     .as_str(),
@@ -959,20 +945,10 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
         save_rate: 100,
     };
 
-    trainer.optimiser.set_params(optimiser::AdamWParams {
-        decay: 0.01,
-        beta1: 0.9,
-        beta2: 0.999,
+    trainer.optimiser.set_params(optimiser::RangerParams {
         min_weight: -0.99,
         max_weight: 0.99,
-    });
-
-    trainer.optimiser.set_params_for_weight("l0t", optimiser::AdamWParams {
-        decay: 0.01,
-        beta1: 0.9,
-        beta2: 0.999,
-        min_weight: -0.99 / 2.0,
-        max_weight: 0.99 / 2.0,
+        ..Default::default()
     });
 
     let settings = make_settings(net.name);
@@ -984,36 +960,22 @@ fn main() {
     // Step 1
     train(
         "/mnt/e/Chess/Data/20ksn-plentyChonker.data",
-        wdl::ConstantWDL { value: 0.15 },
-        lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0128", superbatch: 300 },
+        wdl::LinearWDL { start: 0.15, end: 0.6 },
+        lr::Sequence {
+            first: lr::ConstantLR { value: 0.001 },
+            first_scheduler_final_superbatch: 750,
+            second: lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 250 },
+        },
+        NetConfig { name: "0130", superbatch: 1000 },
         None,
-    );
-
-    // Step 2
-    train(
-        "/mnt/e/Chess/Data/5ksn.data",
-        wdl::ConstantWDL { value: 0.3 },
-        lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0128r", superbatch: 300 },
-        Some(NetConfig { name: "0128", superbatch: 300 }),
     );
 
     // Step 3
     train(
-        "/mnt/e/Chess/Data/20ksn.data",
-        wdl::ConstantWDL { value: 0.6 },
-        lr::CosineDecayLR { initial_lr: 0.00025, final_lr: 0.00025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0128rr", superbatch: 400 },
-        Some(NetConfig { name: "0128r", superbatch: 300 }),
-    );
-
-    // Step 4
-    train(
-        "/mnt/e/Chess/Data/20ksn-adversarial-plentychonker.data",
+        "/mnt/e/Chess/Data/20ksn-plentyChonker.data",
         wdl::ConstantWDL { value: 1.0 },
-        lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 300 },
-        NetConfig { name: "0128rrr", superbatch: 300 },
-        Some(NetConfig { name: "0128rr", superbatch: 400 }),
+        lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
+        NetConfig { name: "0130r", superbatch: 400 },
+        Some(NetConfig { name: "0130", superbatch: 1000 }),
     );
 }
