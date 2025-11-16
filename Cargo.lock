@@ -42,6 +42,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
+name = "atomic_float"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "628d228f918ac3b82fe590352cc719d30664a0c13ca3a60266fe02c7132d480a"
+
+[[package]]
 name = "atty"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -104,9 +110,11 @@ version = "1.0.0"
 dependencies = [
  "acyclib",
  "anyhow",
+ "atomic_float",
  "bullet_cuda_backend",
  "bullet_hip_backend",
  "bulletformat",
+ "bytemuck",
  "montyformat",
  "once_cell",
  "rand",
@@ -122,6 +130,12 @@ name = "bulletformat"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d171953264e8dc3aa62757255e602e507fdd358a94e3cdacb9e481ff3a1c6b0"
+
+[[package]]
+name = "bytemuck"
+version = "1.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fbdf580320f38b612e485521afda1ee26d10cc9884efaaa750d383e13e3c5f4"
 
 [[package]]
 name = "cc"

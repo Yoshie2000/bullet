@@ -104,7 +104,7 @@ pub fn run(inputs: Vec<PathBuf>, output: PathBuf) -> anyhow::Result<()> {
 fn main() {
     const VIRIFORMAT_PATH: &str = "/mnt/e/Chess/Data/Viriformat";
 
-    let inputs: Vec<PathBuf> = fs::read_dir(VIRIFORMAT_PATH).unwrap().map(|file| file.unwrap().path()).filter(|file| file.as_os_str().to_str().unwrap().ends_with(".rlbd") && !file.as_os_str().to_str().unwrap().ends_with("12859.vf.rlbd")).collect();
+    let inputs: Vec<PathBuf> = fs::read_dir(VIRIFORMAT_PATH).unwrap().map(|file| file.unwrap().path()).filter(|file| file.as_os_str().to_str().unwrap().ends_with(".rlbd.2")).collect();
     let output = Path::new("/mnt/e/Chess/Data/combined.vf").to_path_buf();
     run(inputs, output).unwrap();
 }
