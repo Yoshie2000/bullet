@@ -848,9 +848,9 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
         .optimiser(optimiser::AdamW)
         .loss_fn(|output, targets| {
             let mse = output.sigmoid().squared_error(targets);
+            let tipping_point_distance = ((output - 0.5).abs_pow(1.0) - 0.25).abs_pow(1.0);
             // https://www.desmos.com/calculator/8prvh1mqmy?lang=de
-            let tipping_point_distance = (output - 0.5).abs_pow(1.0) / 0.05;
-            let tipping_point_distance = tipping_point_distance.sigmoid();
+            let tipping_point_distance = (tipping_point_distance / 0.05).sigmoid();
             let tpe = 0.4 * tipping_point_distance * (1.0 - tipping_point_distance);
             mse + tpe
         })
