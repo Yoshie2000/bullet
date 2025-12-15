@@ -770,6 +770,10 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
             f(stm ^ stm_flip, ntm ^ ntm_flip) // factorised feature
         });
 
+        // Calculate simple eval to sometimes skip threat features
+        const PIECE_VALUES: [i32; 7] = [1, 3, 3, 5, 9, 0, 0];
+        let mut side_evaluations = [0, 0];
+
         let mut bbs = [0; 8];
         for (pc, sq) in pos.into_iter() {
             let pt = 2 + usize::from(pc & 7);
@@ -777,6 +781,11 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
             let bit = 1 << sq;
             bbs[c] |= bit;
             bbs[pt] |= bit;
+            side_evaluations[c] += PIECE_VALUES[pt - 2];
+        }
+        let material_diff = side_evaluations[0].abs_diff(side_evaluations[1]);
+        if material_diff >= 3 {
+            return;
         }
 
         let mut stm_count = 0;
@@ -938,7 +947,7 @@ fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
         filter_castling: false,
         max_eval_incorrectness: u32::MAX,
         random_fen_skipping: true,
-        random_fen_skip_probability: 0.5,
+        random_fen_skip_probability: 0.05,
         wdl_filtered: false,
         wdl_model_params_a: [0.0; 4],
         wdl_model_params_b: [0.0; 4],
@@ -1023,7 +1032,7 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
     let data_loader = ViriBinpackLoader::new(
         data_path,
         8192,
-        8,
+        4,
         ViriFilter::Custom(filter),
     );
     trainer.run(&schedule, &settings, &data_loader);
@@ -1035,7 +1044,7 @@ fn main() {
         "/mnt/e/Chess/Data/combined.vf",
         wdl::LinearWDL { start: 0.15, end: 0.6 },
         lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 1000 },
-        NetConfig { name: "0135", superbatch: 1000 },
+        NetConfig { name: "0142", superbatch: 1000 },
         None,
     );
 
@@ -1044,7 +1053,7 @@ fn main() {
         "/mnt/e/Chess/Data/combined.vf",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0135r", superbatch: 400 },
-        Some(NetConfig { name: "0135", superbatch: 1000 }),
+        NetConfig { name: "0142r", superbatch: 400 },
+        Some(NetConfig { name: "0142", superbatch: 1000 }),
     );
 }

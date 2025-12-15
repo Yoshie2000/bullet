@@ -20,7 +20,7 @@ use bullet_lib::wdl::WdlScheduler;
 use rand::{Rng, rng};
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{Ordering};
 use viriformat::chess::board::Board;
 use viriformat::chess::chessmove::Move;
 use viriformat::dataformat::Filter;
@@ -357,30 +357,6 @@ pub const fn line_through(i: usize, j: usize) -> u64 {
     0
 }
 
-const TOTAL_THREATS: usize = 2 * offsets::END;
-const TOTAL: usize = TOTAL_THREATS + 768;
-
-static COUNT: AtomicUsize = AtomicUsize::new(0);
-static SQRED: AtomicUsize = AtomicUsize::new(0);
-static EVALS: AtomicUsize = AtomicUsize::new(0);
-static MAX: AtomicUsize = AtomicUsize::new(0);
-const TRACK: bool = false;
-
-pub fn print_feature_stats() {
-    let count = COUNT.load(Ordering::Relaxed);
-    let sqred = SQRED.load(Ordering::Relaxed);
-    let evals = EVALS.load(Ordering::Relaxed);
-    let max = MAX.load(Ordering::Relaxed);
-
-    let mean = count as f64 / evals as f64;
-    let var = sqred as f64 / evals as f64 - mean.powi(2);
-    let pct = 1.96 * var.sqrt();
-
-    println!("Total Evals: {evals}");
-    println!("Maximum Active Features: {max}");
-    println!("Active Features: {mean:.3} +- {pct:.3} (95%)");
-}
-
 pub fn map_piece_threat(
     // maps a threat to a feature index (still need to add half width in case of nstm)
     piece: usize,  // piece type
@@ -538,126 +514,6 @@ fn flip_horizontal(mut bb: u64) -> u64 {
     ((bb >> 4) & K4) | ((bb & K4) << 4)
 }
 
-fn map_features<F: FnMut(usize)>(mut bbs: [u64; 8], mut f: F) {
-    // horiontal mirror
-    let ksq = (bbs[0] & bbs[Piece::KING]).trailing_zeros();
-    if ksq % 8 > 3 {
-        for bb in bbs.iter_mut() {
-            *bb = flip_horizontal(*bb);
-        }
-    };
-
-    let mut pieces = [13; 64];
-    for side in [Side::WHITE, Side::BLACK] {
-        for piece in Piece::PAWN..=Piece::KING {
-            let pc = 6 * side + piece - 2;
-            map_bb(bbs[side] & bbs[piece], |sq| pieces[sq] = pc);
-        }
-    }
-
-    let mut count = 0;
-
-    let occ = bbs[0] | bbs[1];
-
-    for side in [Side::WHITE, Side::BLACK] {
-        let side_offset = offsets::END * side;
-        let opps = bbs[side ^ 1];
-
-        for piece in Piece::PAWN..=Piece::KING {
-            map_bb(bbs[side] & bbs[piece], |sq| {
-                let threats = match piece {
-                    Piece::PAWN => Attacks::pawn(sq, side),
-                    Piece::KNIGHT => Attacks::knight(sq),
-                    Piece::BISHOP => Attacks::bishop(sq, occ),
-                    Piece::ROOK => Attacks::rook(sq, occ),
-                    Piece::QUEEN => Attacks::queen(sq, occ),
-                    Piece::KING => Attacks::king(sq),
-                    _ => unreachable!(),
-                } & occ;
-
-                f(TOTAL_THREATS + [0, 384][side] + 64 * (piece - 2) + sq);
-                count += 1;
-                map_bb(threats, |dest| {
-                    let enemy = (1 << dest) & opps > 0;
-                    if let Some(idx) = map_piece_threat(piece, sq, dest, pieces[dest], enemy) {
-                        f(side_offset + idx);
-                        count += 1;
-                    }
-                });
-            });
-        }
-    }
-
-    if TRACK {
-        COUNT.fetch_add(count, Ordering::Relaxed);
-        SQRED.fetch_add(count * count, Ordering::Relaxed);
-        let evals = EVALS.fetch_add(1, Ordering::Relaxed);
-        MAX.fetch_max(count, Ordering::Relaxed);
-
-        if (evals + 1) % (16384 * 6104) == 0 {
-            print_feature_stats();
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct ThreatInputs;
-impl inputs::SparseInputType for ThreatInputs {
-    type RequiredDataType = ChessBoard;
-
-    fn num_inputs(&self) -> usize {
-        TOTAL
-    }
-
-    fn max_active(&self) -> usize {
-        128 + 32
-    }
-
-    fn map_features<F: FnMut(usize, usize)>(&self, pos: &Self::RequiredDataType, mut f: F) {
-        let mut bbs = [0; 8];
-        for (pc, sq) in pos.into_iter() {
-            let pt = 2 + usize::from(pc & 7);
-            let c = usize::from(pc & 8 > 0);
-            let bit = 1 << sq;
-            bbs[c] |= bit;
-            bbs[pt] |= bit;
-        }
-
-        let mut stm_count = 0;
-        let mut stm_feats = [0; 128];
-        map_features(bbs, |stm| {
-            stm_feats[stm_count] = stm;
-            stm_count += 1;
-        });
-
-        bbs.swap(0, 1);
-        for bb in &mut bbs {
-            *bb = bb.swap_bytes();
-        }
-
-        let mut ntm_count = 0;
-        let mut ntm_feats = [0; 128];
-        map_features(bbs, |ntm| {
-            ntm_feats[ntm_count] = ntm;
-            ntm_count += 1;
-        });
-
-        assert_eq!(stm_count, ntm_count);
-
-        for (&stm, &ntm) in stm_feats.iter().zip(ntm_feats.iter()).take(stm_count) {
-            f(stm, ntm);
-        }
-    }
-
-    fn shorthand(&self) -> String {
-        format!("{TOTAL}")
-    }
-
-    fn description(&self) -> String {
-        "Threat inputs".to_string()
-    }
-}
-
 fn map_features_bucketed<F: FnMut(usize)>(mut bbs: [u64; 8], mut f: F) {
     // horiontal mirror
     let ksq = (bbs[0] & bbs[Piece::KING]).trailing_zeros();
@@ -706,18 +562,9 @@ fn map_features_bucketed<F: FnMut(usize)>(mut bbs: [u64; 8], mut f: F) {
             });
         }
     }
-
-    if TRACK {
-        COUNT.fetch_add(count, Ordering::Relaxed);
-        SQRED.fetch_add(count * count, Ordering::Relaxed);
-        let evals = EVALS.fetch_add(1, Ordering::Relaxed);
-        MAX.fetch_max(count, Ordering::Relaxed);
-
-        if (evals + 1) % (16384 * 6104) == 0 {
-            print_feature_stats();
-        }
-    }
 }
+
+const TOTAL_THREATS: usize = 2 * offsets::END;
 
 fn get_num_buckets<const N: usize>(arr: &[usize; N]) -> usize {
     let mut max = 0;
@@ -938,7 +785,7 @@ fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
         filter_castling: false,
         max_eval_incorrectness: u32::MAX,
         random_fen_skipping: true,
-        random_fen_skip_probability: 0.5,
+        random_fen_skip_probability: 0.05,
         wdl_filtered: false,
         wdl_model_params_a: [0.0; 4],
         wdl_model_params_b: [0.0; 4],
@@ -1023,7 +870,7 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
     let data_loader = ViriBinpackLoader::new(
         data_path,
         8192,
-        8,
+        4,
         ViriFilter::Custom(filter),
     );
     trainer.run(&schedule, &settings, &data_loader);
@@ -1033,9 +880,9 @@ fn main() {
     // Step 1
     train(
         "/mnt/e/Chess/Data/combined.vf",
-        wdl::LinearWDL { start: 0.15, end: 0.6 },
+        wdl::LinearWDL { start: 0.3, end: 0.6 },
         lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 1000 },
-        NetConfig { name: "0135", superbatch: 1000 },
+        NetConfig { name: "0141", superbatch: 1000 },
         None,
     );
 
@@ -1044,7 +891,7 @@ fn main() {
         "/mnt/e/Chess/Data/combined.vf",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0135r", superbatch: 400 },
-        Some(NetConfig { name: "0135", superbatch: 1000 }),
+        NetConfig { name: "0141r", superbatch: 400 },
+        Some(NetConfig { name: "0141", superbatch: 1000 }),
     );
 }

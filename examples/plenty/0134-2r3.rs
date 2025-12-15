@@ -928,6 +928,41 @@ fn piece_count_acceptance(board: &Board) -> f64 {
     acceptance.clamp(0., 1.)
 }
 
+fn wdl_model(material: u32, eval: i32) -> (f64, f64, f64) {
+    let wdl_model_params_a: [f64; 4] = [25.74711885, -56.56097921, -168.40216703, 419.36677674];
+    let wdl_model_params_b: [f64; 4] = [-49.40959966, -88.22723164, 341.88466982, 32.59756080];
+    let material_min = 17;
+    let material_max = 78;
+    let mom_target = 58;
+    let wdl_heuristic_scale = 1.5;
+
+    let m = (material.clamp(material_min, material_max) as f64) / (mom_target as f64);
+
+    let p_as = &wdl_model_params_a;
+    let p_bs = &wdl_model_params_b;
+
+    let a = p_as[0].mul_add(m, p_as[1]).mul_add(m, p_as[2]).mul_add(m, p_as[3]);
+    let b = p_bs[0].mul_add(m, p_bs[1]).mul_add(m, p_bs[2]).mul_add(m, p_bs[3]);
+
+    let b = b * wdl_heuristic_scale;
+
+    let x = eval as f64;
+    let w = 1.0 / (1.0 + f64::exp((a - x) / b));
+    let l = 1.0 / (1.0 + f64::exp((a + x) / b));
+    let d = (1.0 - w - l).max(0.0); // avoid negative draw due to float precision.
+
+    (w, d, l)
+}
+
+fn result_chance(material: u32, eval: i32, wdl: WDL) -> f64 {
+    let (win, draw, loss) = wdl_model(material, eval);
+    match wdl {
+        WDL::Win => win,
+        WDL::Draw => draw,
+        WDL::Loss => loss,
+    }
+}
+
 fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
     let default_viri_filter = Filter {
         min_ply: 8,
@@ -938,10 +973,10 @@ fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
         filter_castling: false,
         max_eval_incorrectness: u32::MAX,
         random_fen_skipping: true,
-        random_fen_skip_probability: 0.5,
+        random_fen_skip_probability: 0.05,
         wdl_filtered: false,
-        wdl_model_params_a: [0.0; 4],
-        wdl_model_params_b: [0.0; 4],
+        wdl_model_params_a: [25.74711885, -56.56097921, -168.40216703, 419.36677674],
+        wdl_model_params_b: [-49.40959966, -88.22723164, 341.88466982, 32.59756080],
         material_min: 17,
         material_max: 78,
         mom_target: 58,
@@ -956,6 +991,7 @@ fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
     };
 
     !default_viri_filter.should_filter(mv, eval as i32, board, wdl, &mut rng)
+        && rng.random_bool(1.0 - result_chance(board.material_count(), eval as i32, wdl))
         && rng.random_bool(piece_count_acceptance(board))
 }
 
@@ -969,26 +1005,13 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
     let mut trainer = make_trainer();
 
     if let Some(load_from_net) = load_from.clone() {
-        if load_from_net.name != net.name {
-            let _ = trainer
-                .optimiser
-                .load_weights_from_file(
-                    format!(
-                        "/mnt/d/Chess Data/Selfgen/Training/{}/net-{}-{}/optimiser_state/weights.bin",
-                        load_from_net.name, load_from_net.name, load_from_net.superbatch
-                    )
-                    .as_str(),
-                )
-                .unwrap();
-        } else {
-            let _ = trainer.load_from_checkpoint(
-                format!(
-                    "/mnt/d/Chess Data/Selfgen/Training/{}/net-{}-{}",
-                    load_from_net.name, load_from_net.name, load_from_net.superbatch
-                )
-                .as_str(),
-            );
-        }
+        let _ = trainer.load_from_checkpoint(
+            format!(
+                "/mnt/d/Chess Data/Selfgen/Training/{}/net-{}-{}",
+                load_from_net.name, load_from_net.name, load_from_net.superbatch
+            )
+            .as_str(),
+        );
     }
 
     let start_superbatch = if load_from.clone().map(|load_from| load_from.name == net.name).unwrap_or(false) {
@@ -1020,31 +1043,17 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
     });
 
     let settings = make_settings(net.name);
-    let data_loader = ViriBinpackLoader::new(
-        data_path,
-        8192,
-        8,
-        ViriFilter::Custom(filter),
-    );
+    let data_loader = ViriBinpackLoader::new(data_path, 8192, 4, ViriFilter::Custom(filter));
     trainer.run(&schedule, &settings, &data_loader);
 }
 
 fn main() {
-    // Step 1
-    train(
-        "/mnt/e/Chess/Data/combined.vf",
-        wdl::LinearWDL { start: 0.15, end: 0.6 },
-        lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 1000 },
-        NetConfig { name: "0135", superbatch: 1000 },
-        None,
-    );
-
     // Step 2
     train(
         "/mnt/e/Chess/Data/combined.vf",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0135r", superbatch: 400 },
-        Some(NetConfig { name: "0135", superbatch: 1000 }),
+        NetConfig { name: "0134-2r4", superbatch: 400 },
+        Some(NetConfig { name: "0134-2", superbatch: 1000 }),
     );
 }

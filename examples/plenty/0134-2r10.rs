@@ -18,8 +18,9 @@ use bullet_lib::value::loader::viribinpack::ViriFilter;
 use bullet_lib::wdl;
 use bullet_lib::wdl::WdlScheduler;
 use rand::{Rng, rng};
-use std::mem::MaybeUninit;
-use std::sync::atomic::AtomicU64;
+use std::cell::RefCell;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use viriformat::chess::board::Board;
 use viriformat::chess::chessmove::Move;
@@ -891,43 +892,6 @@ fn make_settings(experiment_name: &str) -> LocalSettings<'_> {
     };
 }
 
-fn piece_count_acceptance(board: &Board) -> f64 {
-    #[rustfmt::skip]
-    const DESIRED_DISTRIBUTION: [f64; 33] = [
-        0.018411966423, 0.020641545085, 0.022727271053,
-        0.024669162740, 0.026467201733, 0.028121406444,
-        0.029631758462, 0.030998276198, 0.032220941240,
-        0.033299772000, 0.034234750067, 0.035025893853,
-        0.035673184944, 0.036176641754, 0.036536245870,
-        0.036752015705, 0.036823932846, 0.036752015705,
-        0.036536245870, 0.036176641754, 0.035673184944,
-        0.035025893853, 0.034234750067, 0.033299772000,
-        0.032220941240, 0.030998276198, 0.029631758462,
-        0.028121406444, 0.026467201733, 0.024669162740,
-        0.022727271053, 0.020641545085, 0.018411966423,
-    ];
-
-    static PIECE_COUNT_STATS: [AtomicU64; 33] = {
-        let mut arr: [std::mem::MaybeUninit<AtomicU64>; 33] = [const { MaybeUninit::uninit() }; 33];
-        let mut i = 0;
-        while i < 33 {
-            arr[i].write(AtomicU64::new(0));
-            i += 1;
-        }
-        unsafe { std::mem::transmute::<_, [AtomicU64; 33]>(arr) }
-    };
-    static PIECE_COUNT_TOTAL: AtomicU64 = AtomicU64::new(0);
-
-    let pc = board.pieces.occupied().count() as usize;
-    let count = PIECE_COUNT_STATS[pc].fetch_add(1, Ordering::Relaxed) + 1;
-    let total = PIECE_COUNT_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
-    let frequency = count as f64 / total as f64;
-
-    // Calculate the acceptance probability for this piece count
-    let acceptance = 0.5 * DESIRED_DISTRIBUTION[pc] / frequency;
-    acceptance.clamp(0., 1.)
-}
-
 fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
     let default_viri_filter = Filter {
         min_ply: 8,
@@ -956,7 +920,6 @@ fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
     };
 
     !default_viri_filter.should_filter(mv, eval as i32, board, wdl, &mut rng)
-        && rng.random_bool(piece_count_acceptance(board))
 }
 
 fn train<WDL: WdlScheduler, LR: LrScheduler>(
@@ -1023,28 +986,19 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
     let data_loader = ViriBinpackLoader::new(
         data_path,
         8192,
-        8,
+        4,
         ViriFilter::Custom(filter),
     );
     trainer.run(&schedule, &settings, &data_loader);
 }
 
 fn main() {
-    // Step 1
-    train(
-        "/mnt/e/Chess/Data/combined.vf",
-        wdl::LinearWDL { start: 0.15, end: 0.6 },
-        lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 1000 },
-        NetConfig { name: "0135", superbatch: 1000 },
-        None,
-    );
-
     // Step 2
     train(
         "/mnt/e/Chess/Data/combined.vf",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0135r", superbatch: 400 },
-        Some(NetConfig { name: "0135", superbatch: 1000 }),
+        NetConfig { name: "0134-2r10", superbatch: 400 },
+        Some(NetConfig { name: "0134-2", superbatch: 1000 }),
     );
 }

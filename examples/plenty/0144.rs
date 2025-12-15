@@ -18,6 +18,8 @@ use bullet_lib::value::loader::viribinpack::ViriFilter;
 use bullet_lib::wdl;
 use bullet_lib::wdl::WdlScheduler;
 use rand::{Rng, rng};
+use viriformat::chess::board::movegen::RAY_BETWEEN;
+use viriformat::chess::squareset::SquareSet;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -753,7 +755,7 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
     type RequiredDataType = ChessBoard;
 
     fn num_inputs(&self) -> usize {
-        768 + TOTAL_THREATS + 768 * self.num_buckets
+        768 + TOTAL_THREATS + 768 * 2 * self.num_buckets
     }
 
     fn max_active(&self) -> usize {
@@ -761,22 +763,61 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
     }
 
     fn map_features<F: FnMut(usize, usize)>(&self, pos: &Self::RequiredDataType, mut f: F) {
-        let get = |ksq| (if ksq % 8 > 3 { 7 } else { 0 }, 768 * self.buckets[usize::from(ksq)]);
-        let (stm_flip, stm_bucket) = get(pos.our_ksq());
-        let (ntm_flip, ntm_bucket) = get(pos.opp_ksq());
-        Chess768.map_features(pos, |stm, ntm| {
-            let bucketed_offset = 768 + TOTAL_THREATS;
-            f(bucketed_offset + stm_bucket + (stm ^ stm_flip), bucketed_offset + ntm_bucket + (ntm ^ ntm_flip)); // bucketed feature
-            f(stm ^ stm_flip, ntm ^ ntm_flip) // factorised feature
-        });
-
+        // Build bitboards
         let mut bbs = [0; 8];
+        let mut kings = [64, 64];
         for (pc, sq) in pos.into_iter() {
             let pt = 2 + usize::from(pc & 7);
             let c = usize::from(pc & 8 > 0);
             let bit = 1 << sq;
             bbs[c] |= bit;
             bbs[pt] |= bit;
+
+            if pt - 2 == 5 {
+                assert_eq!(64, kings[c]);
+                kings[c] = sq as usize;
+            }
+        }
+        assert_ne!(64, kings[0]);
+        assert_ne!(64, kings[1]);
+
+        // Compute pinned pieces of each side
+        let mut pinned = [0 as u64; 2];
+        for c in [0, 1] {
+            let rooks_queens = (bbs[5] | bbs[6]) & attacks::ROOK[kings[c]];
+            let bishops_queens = (bbs[4] | bbs[6]) & attacks::BISHOP[kings[c]];
+            let mut possible_pinners = (rooks_queens | bishops_queens) & bbs[1 - c];
+
+            while possible_pinners > 0 {
+                let sq = possible_pinners.trailing_zeros() as usize;
+                possible_pinners &= possible_pinners - 1;
+
+                let blocker = SquareSet::from_inner(bbs[c]) & RAY_BETWEEN[kings[c]][sq];
+                if blocker.count() == 1 {
+                    pinned[c] |= blocker.inner();
+                }
+            }
+        }
+
+        let get = |ksq| (if ksq % 8 > 3 { 7 } else { 0 }, 768 * 2 * self.buckets[usize::from(ksq)]);
+        let (stm_flip, stm_bucket) = get(pos.our_ksq());
+        let (ntm_flip, ntm_bucket) = get(pos.opp_ksq());
+
+        // Chess768 features
+        for (piece, square) in pos.into_iter() {
+            let c = usize::from(piece & 8 > 0);
+            let pc = 64 * usize::from(piece & 7);
+            let sq = usize::from(square);
+
+            let stm = [0, 384][c] + pc + sq;
+            let ntm = [384, 0][c] + pc + (sq ^ 56);
+
+            let is_pinned = (pinned[c] & (1 << sq)) > 0;
+            let pinned_offset = [0, 768][is_pinned as usize];
+
+            let bucketed_offset = 768 + TOTAL_THREATS;
+            f(bucketed_offset + stm_bucket + pinned_offset + (stm ^ stm_flip), bucketed_offset + ntm_bucket + pinned_offset + (ntm ^ ntm_flip)); // bucketed feature
+            f(stm ^ stm_flip, ntm ^ ntm_flip); // factorised feature
         }
 
         let mut stm_count = 0;
@@ -861,7 +902,7 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
         ])
         .build(|builder, stm, ntm, buckets| {
             // Build layers
-            let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
+            let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * 2 * KING_BUCKETS, L1_SIZE);
             let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
@@ -938,7 +979,7 @@ fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
         filter_castling: false,
         max_eval_incorrectness: u32::MAX,
         random_fen_skipping: true,
-        random_fen_skip_probability: 0.5,
+        random_fen_skip_probability: 0.05,
         wdl_filtered: false,
         wdl_model_params_a: [0.0; 4],
         wdl_model_params_b: [0.0; 4],
@@ -1023,7 +1064,7 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
     let data_loader = ViriBinpackLoader::new(
         data_path,
         8192,
-        8,
+        4,
         ViriFilter::Custom(filter),
     );
     trainer.run(&schedule, &settings, &data_loader);
@@ -1035,7 +1076,7 @@ fn main() {
         "/mnt/e/Chess/Data/combined.vf",
         wdl::LinearWDL { start: 0.15, end: 0.6 },
         lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 1000 },
-        NetConfig { name: "0135", superbatch: 1000 },
+        NetConfig { name: "0144", superbatch: 1000 },
         None,
     );
 
@@ -1044,7 +1085,7 @@ fn main() {
         "/mnt/e/Chess/Data/combined.vf",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0135r", superbatch: 400 },
-        Some(NetConfig { name: "0135", superbatch: 1000 }),
+        NetConfig { name: "0144r", superbatch: 400 },
+        Some(NetConfig { name: "0144", superbatch: 1000 }),
     );
 }
