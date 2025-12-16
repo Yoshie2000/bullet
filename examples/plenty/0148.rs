@@ -1,5 +1,21 @@
+use acyclib::dag::NodeId;
+use acyclib::device::function;
+use acyclib::device::function::DeviceFunction;
+use acyclib::graph::Graph;
+use acyclib::graph::GraphNodeIdTy;
+use acyclib::graph::ir::GraphIR;
+use acyclib::graph::ir::GraphIRError;
+use acyclib::graph::ir::node::AnnotatedNode;
+use acyclib::graph::ir::operation::GraphIROperationBase;
+use acyclib::graph::builder::GraphBuilderNode;
+use acyclib::graph::ir::operation::GraphIROperationCompilable;
 use acyclib::trainer::optimiser::adam::AdamW;
 use bullet_cuda_backend::CudaDevice;
+use bullet_cuda_backend::CudaMarker;
+use bullet_cuda_backend::kernel::Expr;
+use bullet_cuda_backend::kernel::Kernel;
+use bullet_cuda_backend::kernel::KernelArgs;
+use bullet_cuda_backend::kernel::KernelInput;
 use bullet_lib::LocalSettings;
 use bullet_lib::TrainingSchedule;
 use bullet_lib::TrainingSteps;
@@ -9,6 +25,8 @@ use bullet_lib::game::inputs::Chess768;
 use bullet_lib::game::outputs::MaterialCount;
 use bullet_lib::lr;
 use bullet_lib::lr::LrScheduler;
+use bullet_lib::nn::InitSettings;
+use bullet_lib::nn::Shape;
 use bullet_lib::nn::optimiser;
 use bullet_lib::trainer::save::SavedFormat;
 use bullet_lib::value::ValueTrainer;
@@ -814,6 +832,19 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
     }
 }
 
+const KING_BUCKETS: usize = 12;
+const OUTPUT_BUCKETS: usize = 8;
+const L1_SIZE: usize = 640;
+const L2_SIZE: usize = 16;
+const L3_SIZE: usize = 32;
+
+const NUM_PST_INPUTS: usize = 768 * (KING_BUCKETS + 1);
+const NUM_PST_TI_INPUTS: usize = TOTAL_THREATS + NUM_PST_INPUTS;
+const PST_START_IDX: usize = TOTAL_THREATS;
+const PST_END_IDX: usize = NUM_PST_TI_INPUTS;
+const MAX_PST_TI_INDICES: usize = 128 + 32;
+const MAX_PST_INDICES: usize = 32;
+
 #[derive(Clone, Debug)]
 pub struct ExtractPSTInputs(AnnotatedNode);
 
@@ -929,22 +960,18 @@ struct NetConfig<'a> {
 const TRAINING_DIR: &str = "/mnt/d/Chess Data/Selfgen/Training";
 
 fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored, MaterialCount<8>> {
+
     #[rustfmt::skip]
     let inputs = ThreatInputsBucketsMirrored::new([
-            00, 01, 02, 03,
-            04, 05, 06, 07,
-            08, 08, 09, 09,
-            10, 10, 10, 10,
-            11, 11, 11, 11,
-            11, 11, 11, 11,
-            11, 11, 11, 11,
-            11, 11, 11, 11,
-        ]);
-    const KING_BUCKETS: usize = 12;
-    const OUTPUT_BUCKETS: usize = 8;
-    const L1_SIZE: usize = 640;
-    const L2_SIZE: usize = 16;
-    const L3_SIZE: usize = 32;
+        00, 01, 02, 03,
+        04, 05, 06, 07,
+        08, 08, 09, 09,
+        10, 10, 10, 10,
+        11, 11, 11, 11,
+        11, 11, 11, 11,
+        11, 11, 11, 11,
+        11, 11, 11, 11,
+    ]);
 
     #[rustfmt::skip]
     return ValueTrainerBuilder::default()
@@ -954,9 +981,9 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
         .inputs(inputs)
         .output_buckets(MaterialCount::<OUTPUT_BUCKETS>)
         .save_format(&[
-            SavedFormat::id("l0tw"),
+            SavedFormat::id("l0w"),
             SavedFormat::id("l0pw"),
-            SavedFormat::id("l0tb").transform(|graph, weights| graph.get("l0pb").values.iter().zip(weights).map(|pb, tb| pb + tb).collect()),
+            SavedFormat::id("l0b"),
             SavedFormat::id("l1w"),
             SavedFormat::id("l1b"),
             SavedFormat::id("l2w"),
@@ -966,22 +993,26 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
         ])
         .build(|builder, stm, ntm, buckets| {
             // Build layers
-            let l0t = builder.new_affine("l0t", TOTAL_THREATS, L1_SIZE);
-            let l0p = builder.new_affine("l0p", 768 + 768 * KING_BUCKETS, 2 * L1_SIZE);
+            let l0 = builder.new_affine("l0", TOTAL_THREATS + 768 * (KING_BUCKETS + 1), L1_SIZE);
+
+            let init = InitSettings::Normal { mean: 0.0, stdev: (2.0 / (768.0 * (KING_BUCKETS + 1) as f32)).sqrt() };
+            let l0p = builder.new_weights("l0pw", Shape::new(2 * L1_SIZE, 768 * (KING_BUCKETS + 1)), init);
+
             let l1 = builder.new_affine("l1", 2 * L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
 
             // Crelu + Pairwise
-            let stm_threats, stm_pst = split_input(stm);
-            let stm_threats_subnet = l0t.forward(stm_threats);
-            let stm_threats_subnet = stm_threats_subnet.concat(stm_threats_subnet);
-            let ntm_threats, ntm_pst = split_input(ntm);
-            let ntm_threats_subnet = l0t.forward(ntm_threats);
-            let ntm_threats_subnet = ntm_threats_subnet.concat(ntm_threats_subnet);
+            let l0_out_stm = l0.forward(stm);
+            let l0_out_stm = l0_out_stm.concat(l0_out_stm);
+            let l0_out_ntm = l0.forward(ntm);
+            let l0_out_ntm = l0_out_ntm.concat(l0_out_ntm);
 
-            let stm_subnet = (l0p.forward(stm_pst) + stm_threats_subnet).crelu().pairwise_mul();
-            let ntm_subnet = (l0p.forward(ntm_pst) + ntm_threats_subnet).crelu().pairwise_mul();
+            let l0p_out_stm = l0p.matmul(builder.apply(ExtractPSTInputs::new(stm.copy())));
+            let l0p_out_ntm = l0p.matmul(builder.apply(ExtractPSTInputs::new(ntm.copy())));
+
+            let stm_subnet = (l0_out_stm + l0p_out_stm).crelu().pairwise_mul();
+            let ntm_subnet = (l0_out_ntm + l0p_out_ntm).crelu().pairwise_mul();
             let pairwise_out = stm_subnet.concat(ntm_subnet);
             // Dual activation
             let l1_out = l1.forward(pairwise_out).select(buckets);
