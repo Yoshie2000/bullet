@@ -25,7 +25,6 @@ use bullet_lib::game::inputs::Chess768;
 use bullet_lib::game::outputs::MaterialCount;
 use bullet_lib::lr;
 use bullet_lib::lr::LrScheduler;
-use bullet_lib::nn::InitSettings;
 use bullet_lib::nn::Shape;
 use bullet_lib::nn::optimiser;
 use bullet_lib::trainer::save::SavedFormat;
@@ -784,8 +783,9 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
         let (ntm_flip, ntm_bucket) = get(pos.opp_ksq());
         Chess768.map_features(pos, |stm, ntm| {
             let bucketed_offset = 768 + TOTAL_THREATS;
+            let factorised_offset = TOTAL_THREATS;
             f(bucketed_offset + stm_bucket + (stm ^ stm_flip), bucketed_offset + ntm_bucket + (ntm ^ ntm_flip)); // bucketed feature
-            f(stm ^ stm_flip, ntm ^ ntm_flip) // factorised feature
+            f(factorised_offset + stm ^ stm_flip, factorised_offset + ntm ^ ntm_flip) // factorised feature
         });
 
         let mut bbs = [0; 8];
@@ -819,7 +819,7 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
         assert_eq!(stm_count, ntm_count);
 
         for (&stm, &ntm) in stm_feats.iter().zip(ntm_feats.iter()).take(stm_count) {
-            f(768 + stm, 768 + ntm); // factoriser offset
+            f(stm, ntm);
         }
     }
 
@@ -984,8 +984,11 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
             SavedFormat::id("l0w"),
             SavedFormat::id("l0pw"),
             SavedFormat::id("l0b"),
+            SavedFormat::id("l0pb"),
             SavedFormat::id("l1w"),
+            SavedFormat::id("l1pw"),
             SavedFormat::id("l1b"),
+            SavedFormat::id("l1pb"),
             SavedFormat::id("l2w"),
             SavedFormat::id("l2b"),
             SavedFormat::id("l3w"),
@@ -994,30 +997,28 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
         .build(|builder, stm, ntm, buckets| {
             // Build layers
             let l0 = builder.new_affine("l0", TOTAL_THREATS + 768 * (KING_BUCKETS + 1), L1_SIZE);
+            let l0p = builder.new_affine("l0p", 768 * (KING_BUCKETS + 1), L1_SIZE);
+            
+            let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
+            let l1p = builder.new_affine("l1p", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
 
-            let init = InitSettings::Normal { mean: 0.0, stdev: (2.0 / (768.0 * (KING_BUCKETS + 1) as f32)).sqrt() };
-            let l0p = builder.new_weights("l0pw", Shape::new(2 * L1_SIZE, 768 * (KING_BUCKETS + 1)), init);
-
-            let l1 = builder.new_affine("l1", 2 * L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
 
-            // Combine differently sized L1s for threat and PST features
-            let l0_out_stm = l0.forward(stm);
-            let l0_out_stm = l0_out_stm.concat(l0_out_stm);
-            let l0_out_ntm = l0.forward(ntm);
-            let l0_out_ntm = l0_out_ntm.concat(l0_out_ntm);
-
-            let l0p_out_stm = l0p.matmul(builder.apply(ExtractPSTInputs::new(stm)));
-            let l0p_out_ntm = l0p.matmul(builder.apply(ExtractPSTInputs::new(ntm)));
+            // Combined L1, as well as separate L1 for just PST features 
+            let l0_stm = l0.forward(stm).crelu().pairwise_mul();
+            let l0_ntm = l0.forward(ntm).crelu().pairwise_mul();
             
-            // Crelu + Pairwise
-            let stm_subnet = (l0_out_stm + l0p_out_stm).crelu().pairwise_mul();
-            let ntm_subnet = (l0_out_ntm + l0p_out_ntm).crelu().pairwise_mul();
-            let pairwise_out = stm_subnet.concat(ntm_subnet);
+            let pstm = builder.apply(ExtractPSTInputs::new(stm));
+            let pntm = builder.apply(ExtractPSTInputs::new(ntm));
+            let l0_pstm = l0p.forward(pstm).crelu().pairwise_mul();
+            let l0_pntm = l0p.forward(pntm).crelu().pairwise_mul();
+            
+            // L1 concat + activation
+            let l1_ti = l1.forward(l0_stm.concat(l0_ntm));
+            let l1_pst = l1p.forward(l0_pstm.concat(l0_pntm));
 
-            // Dual activation
-            let l1_out = l1.forward(pairwise_out).select(buckets);
+            let l1_out = l1_ti.select(buckets) + l1_pst.select(buckets);
             let l1_out = l1_out.concat(l1_out.abs_pow(2.0));
             let l1_out = l1_out.crelu();
 
