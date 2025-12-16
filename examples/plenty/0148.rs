@@ -1002,22 +1002,25 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
 
-            // Crelu + Pairwise
+            // Combine differently sized L1s for threat and PST features
             let l0_out_stm = l0.forward(stm);
             let l0_out_stm = l0_out_stm.concat(l0_out_stm);
             let l0_out_ntm = l0.forward(ntm);
             let l0_out_ntm = l0_out_ntm.concat(l0_out_ntm);
 
-            let l0p_out_stm = l0p.matmul(builder.apply(ExtractPSTInputs::new(stm.copy())));
-            let l0p_out_ntm = l0p.matmul(builder.apply(ExtractPSTInputs::new(ntm.copy())));
-
+            let l0p_out_stm = l0p.matmul(builder.apply(ExtractPSTInputs::new(stm)));
+            let l0p_out_ntm = l0p.matmul(builder.apply(ExtractPSTInputs::new(ntm)));
+            
+            // Crelu + Pairwise
             let stm_subnet = (l0_out_stm + l0p_out_stm).crelu().pairwise_mul();
             let ntm_subnet = (l0_out_ntm + l0p_out_ntm).crelu().pairwise_mul();
             let pairwise_out = stm_subnet.concat(ntm_subnet);
+
             // Dual activation
             let l1_out = l1.forward(pairwise_out).select(buckets);
             let l1_out = l1_out.concat(l1_out.abs_pow(2.0));
             let l1_out = l1_out.crelu();
+
             // L2 + L3 forward
             let l2_out = l2.forward(l1_out).select(buckets).screlu();
             let l3_out = l3.forward(l2_out.concat(l1_out)).select(buckets);
