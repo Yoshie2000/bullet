@@ -1,21 +1,5 @@
-use acyclib::dag::NodeId;
-use acyclib::device::function;
-use acyclib::device::function::DeviceFunction;
-use acyclib::graph::Graph;
-use acyclib::graph::GraphNodeIdTy;
-use acyclib::graph::ir::GraphIR;
-use acyclib::graph::ir::GraphIRError;
-use acyclib::graph::ir::node::AnnotatedNode;
-use acyclib::graph::ir::operation::GraphIROperationBase;
-use acyclib::graph::builder::GraphBuilderNode;
-use acyclib::graph::ir::operation::GraphIROperationCompilable;
 use acyclib::trainer::optimiser::adam::AdamW;
 use bullet_cuda_backend::CudaDevice;
-use bullet_cuda_backend::CudaMarker;
-use bullet_cuda_backend::kernel::Expr;
-use bullet_cuda_backend::kernel::Kernel;
-use bullet_cuda_backend::kernel::KernelArgs;
-use bullet_cuda_backend::kernel::KernelInput;
 use bullet_lib::LocalSettings;
 use bullet_lib::TrainingSchedule;
 use bullet_lib::TrainingSteps;
@@ -25,7 +9,6 @@ use bullet_lib::game::inputs::Chess768;
 use bullet_lib::game::outputs::MaterialCount;
 use bullet_lib::lr;
 use bullet_lib::lr::LrScheduler;
-use bullet_lib::nn::Shape;
 use bullet_lib::nn::optimiser;
 use bullet_lib::trainer::save::SavedFormat;
 use bullet_lib::value::ValueTrainer;
@@ -783,9 +766,8 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
         let (ntm_flip, ntm_bucket) = get(pos.opp_ksq());
         Chess768.map_features(pos, |stm, ntm| {
             let bucketed_offset = 768 + TOTAL_THREATS;
-            let factorised_offset = TOTAL_THREATS;
             f(bucketed_offset + stm_bucket + (stm ^ stm_flip), bucketed_offset + ntm_bucket + (ntm ^ ntm_flip)); // bucketed feature
-            f(factorised_offset + (stm ^ stm_flip), factorised_offset + (ntm ^ ntm_flip)) // factorised feature
+            f(stm ^ stm_flip, ntm ^ ntm_flip) // factorised feature
         });
 
         let mut bbs = [0; 8];
@@ -819,7 +801,7 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
         assert_eq!(stm_count, ntm_count);
 
         for (&stm, &ntm) in stm_feats.iter().zip(ntm_feats.iter()).take(stm_count) {
-            f(stm, ntm);
+            f(768 + stm, 768 + ntm); // factoriser offset
         }
     }
 
@@ -829,123 +811,6 @@ impl inputs::SparseInputType for ThreatInputsBucketsMirrored {
 
     fn description(&self) -> String {
         "Threat inputs bucketed mirrored factorised".to_string()
-    }
-}
-
-const KING_BUCKETS: usize = 12;
-const OUTPUT_BUCKETS: usize = 8;
-const L1_SIZE: usize = 640;
-const L2_SIZE: usize = 16;
-const L3_SIZE: usize = 32;
-
-const NUM_PST_INPUTS: usize = 768 * (KING_BUCKETS + 1);
-const NUM_PST_TI_INPUTS: usize = TOTAL_THREATS + NUM_PST_INPUTS;
-const PST_START_IDX: usize = TOTAL_THREATS;
-const PST_END_IDX: usize = NUM_PST_TI_INPUTS;
-const MAX_PST_TI_INDICES: usize = 128 + 32;
-const MAX_PST_INDICES: usize = 32;
-
-#[derive(Clone, Debug)]
-pub struct ExtractPSTInputs(AnnotatedNode);
-
-impl ExtractPSTInputs {
-    pub fn new<'a>(input: GraphBuilderNode<'a, CudaMarker>) -> Self {
-        Self(input.annotated_node())
-    }
-}
-
-impl GraphIROperationBase<CudaMarker> for ExtractPSTInputs {
-    fn nodes(&self) -> Vec<AnnotatedNode> {
-        vec![self.0]
-    }
-
-    fn output_layout(&self, ir: &GraphIR<CudaMarker>) -> Result<Option<std::num::NonZeroUsize>, GraphIRError> {
-        let ty = ir.get(self.0.idx)?.ty();
-
-        if ty.shape != Shape::new(NUM_PST_TI_INPUTS, 1) || ty.sparse != std::num::NonZeroUsize::new(MAX_PST_TI_INDICES)  {
-            panic!("SHIT");
-        }
-
-        Ok(std::num::NonZeroUsize::new(MAX_PST_INDICES))
-    }
-
-    fn output_shape(&self, _ir: &GraphIR<CudaMarker>) -> Result<Shape, GraphIRError> {
-        Ok(Shape::new(NUM_PST_INPUTS, 1))
-    }
-}
-
-impl GraphIROperationCompilable<CudaMarker> for ExtractPSTInputs {
-    fn forward_pass(&self, graph: &Graph<CudaDevice>, output_node: NodeId) -> DeviceFunction<CudaDevice> {
-        let input = graph.get_ref(self.0.idx, GraphNodeIdTy::Values);
-        let output = graph.get_ref(output_node, GraphNodeIdTy::Values);
-
-        let mut func = DeviceFunction::default();
-
-        func.push(function::MaybeUpdateBatchSize { input: input.clone(), output: output.clone() });
-
-        let threads = 512;
-        let batch_size = Expr::Var;
-        let blocks = (batch_size.clone() + threads - 1) / threads;
-        let grid_dim = [blocks, Expr::Const(1), Expr::Const(1)];
-        let block_dim = [threads, 1, 1].map(Expr::Const);
-        let shared_mem_bytes = Expr::Const(0);
-
-        let batched = input.batch_size().is_some();
-
-        let inputs = vec![
-            KernelInput::Size(batch_size),
-            KernelInput::Slice {
-                slice: input,
-                layout: MAX_PST_TI_INDICES.into(),
-                mutable: false,
-                batched,
-                shape: self.0.shape,
-            },
-            KernelInput::Slice {
-                slice: output,
-                layout: MAX_PST_INDICES.into(),
-                mutable: true,
-                batched,
-                shape: Shape::new(NUM_PST_INPUTS, 1),
-            },
-        ];
-
-        let args = KernelArgs { inputs, grid_dim, block_dim, shared_mem_bytes };
-
-        let code = format!(
-            "
-            extern \"C\" __global__ void kernel(int k, const int* I, int* O) {{
-                const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-                if (tid >= k) return;
-
-                int cnt = 0;
-
-                for (int i = 0; i < {MAX_PST_TI_INDICES}; i++) {{
-                    int j = I[{MAX_PST_TI_INDICES} * tid + i];
-
-                    if (j >= {PST_START_IDX} && j < {PST_END_IDX}) {{
-                        O[{MAX_PST_INDICES} * tid + cnt] = j - {PST_START_IDX};
-                        cnt++;
-                    }}
-                }}
-
-                for (int i = cnt; i < {MAX_PST_INDICES}; i++) {{
-                    O[{MAX_PST_INDICES} * tid + i] = -1;
-                }}
-            }}
-        "
-        );
-
-        let kernel = unsafe { Kernel::new("ExtractPSTInputs".to_string(), code, args) };
-
-        func.push(kernel.unwrap());
-
-        func
-    }
-
-    fn backward_pass(&self, _: &Graph<CudaDevice>, _: NodeId) -> DeviceFunction<CudaDevice> {
-        unimplemented!()
     }
 }
 
@@ -960,18 +825,22 @@ struct NetConfig<'a> {
 const TRAINING_DIR: &str = "/mnt/d/Chess Data/Selfgen/Training";
 
 fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored, MaterialCount<8>> {
-
     #[rustfmt::skip]
     let inputs = ThreatInputsBucketsMirrored::new([
-        00, 01, 02, 03,
-        04, 05, 06, 07,
-        08, 08, 09, 09,
-        10, 10, 10, 10,
-        11, 11, 11, 11,
-        11, 11, 11, 11,
-        11, 11, 11, 11,
-        11, 11, 11, 11,
-    ]);
+            00, 01, 02, 03,
+            04, 05, 06, 07,
+            08, 08, 09, 09,
+            10, 10, 10, 10,
+            11, 11, 11, 11,
+            11, 11, 11, 11,
+            11, 11, 11, 11,
+            11, 11, 11, 11,
+        ]);
+    const KING_BUCKETS: usize = 12;
+    const OUTPUT_BUCKETS: usize = 8;
+    const L1_SIZE: usize = 640;
+    const L2_SIZE: usize = 16;
+    const L3_SIZE: usize = 32;
 
     #[rustfmt::skip]
     return ValueTrainerBuilder::default()
@@ -982,9 +851,7 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
         .output_buckets(MaterialCount::<OUTPUT_BUCKETS>)
         .save_format(&[
             SavedFormat::id("l0w"),
-            SavedFormat::id("l0pw"),
             SavedFormat::id("l0b"),
-            SavedFormat::id("l0pb"),
             SavedFormat::id("l1w"),
             SavedFormat::id("l1b"),
             SavedFormat::id("l2w"),
@@ -994,28 +861,19 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
         ])
         .build(|builder, stm, ntm, buckets| {
             // Build layers
-            let l0 = builder.new_affine("l0", TOTAL_THREATS + 768 * (KING_BUCKETS + 1), L1_SIZE);
-            let l0p = builder.new_affine("l0p", 768 * (KING_BUCKETS + 1), L1_SIZE);
-            
-            let l1 = builder.new_affine("l1", 2 * L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
+            let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
+            let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
 
-            // Combined L1, as well as separate L1 for just PST features 
-            let l0_stm = l0.forward(stm).crelu().pairwise_mul();
-            let l0_ntm = l0.forward(ntm).crelu().pairwise_mul();
-            
-            let pstm = builder.apply(ExtractPSTInputs::new(stm));
-            let pntm = builder.apply(ExtractPSTInputs::new(ntm));
-            let l0_pstm = l0p.forward(pstm).crelu().pairwise_mul();
-            let l0_pntm = l0p.forward(pntm).crelu().pairwise_mul();
-            
-            // L1 concat + activation
-            let l1_in = l0_stm.concat(l0_ntm).concat(l0_pstm).concat(l0_pntm);
-            let l1_out = l1.forward(l1_in).select(buckets);
+            // Crelu + Pairwise
+            let stm_subnet = l0.forward(stm).crelu().pairwise_mul();
+            let ntm_subnet = l0.forward(ntm).crelu().pairwise_mul();
+            let pairwise_out = stm_subnet.concat(ntm_subnet);
+            // Dual activation
+            let l1_out = l1.forward(pairwise_out).select(buckets);
             let l1_out = l1_out.concat(l1_out.abs_pow(2.0));
             let l1_out = l1_out.crelu();
-
             // L2 + L3 forward
             let l2_out = l2.forward(l1_out).select(buckets).screlu();
             let l3_out = l3.forward(l2_out.concat(l1_out)).select(buckets);
@@ -1097,7 +955,11 @@ fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
         _ => unreachable!(),
     };
 
-    !default_viri_filter.should_filter(mv, eval as i32, board, wdl, &mut rng)
+    fn should_filter_custom(_: Move, _: i32, board: &Board, _: WDL) -> bool {
+        board.ply() >= 160
+    }
+
+    !default_viri_filter.should_filter(mv, eval as i32, board, wdl, &mut rng) && !should_filter_custom(mv, eval as i32, board, wdl)
         && rng.random_bool(piece_count_acceptance(board))
 }
 
@@ -1172,21 +1034,12 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
 }
 
 fn main() {
-    // Step 1
-    train(
-        "/mnt/e/Chess/Data/combined.vf",
-        wdl::LinearWDL { start: 0.15, end: 0.6 },
-        lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 1000 },
-        NetConfig { name: "0148", superbatch: 1000 },
-        None,
-    );
-
     // Step 2
     train(
         "/mnt/e/Chess/Data/combined.vf",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0148r", superbatch: 400 },
-        Some(NetConfig { name: "0148", superbatch: 1000 }),
+        NetConfig { name: "0134-2r17", superbatch: 400 },
+        Some(NetConfig { name: "0134-2", superbatch: 1000 }),
     );
 }
