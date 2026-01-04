@@ -507,6 +507,18 @@ name = "0160"
 path = "../../examples/plenty/0160.rs"
 
 [[example]]
+name = "0160rr"
+path = "../../examples/plenty/0160rr.rs"
+
+[[example]]
+name = "0160rr2"
+path = "../../examples/plenty/0160rr2.rs"
+
+[[example]]
+name = "0160rr3"
+path = "../../examples/plenty/0160rr3.rs"
+
+[[example]]
 name = "relabel-0098"
 path = "../../examples/plenty/relabel-0098.rs"
 
