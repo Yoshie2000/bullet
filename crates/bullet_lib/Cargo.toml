@@ -399,6 +399,14 @@ name = "0134-2r23"
 path = "../../examples/plenty/0134-2r23.rs"
 
 [[example]]
+name = "0134-2r24"
+path = "../../examples/plenty/0134-2r24.rs"
+
+[[example]]
+name = "0134-2r25"
+path = "../../examples/plenty/0134-2r25.rs"
+
+[[example]]
 name = "0135"
 path = "../../examples/plenty/0135.rs"
 
@@ -517,6 +525,30 @@ path = "../../examples/plenty/0160rr2.rs"
 [[example]]
 name = "0160rr3"
 path = "../../examples/plenty/0160rr3.rs"
+
+[[example]]
+name = "0160rr4"
+path = "../../examples/plenty/0160rr4.rs"
+
+[[example]]
+name = "0160rr5"
+path = "../../examples/plenty/0160rr5.rs"
+
+[[example]]
+name = "0161"
+path = "../../examples/plenty/0161.rs"
+
+[[example]]
+name = "0161r"
+path = "../../examples/plenty/0161r.rs"
+
+[[example]]
+name = "0162"
+path = "../../examples/plenty/0162.rs"
+
+[[example]]
+name = "0162r"
+path = "../../examples/plenty/0162r.rs"
 
 [[example]]
 name = "relabel-0098"
