@@ -10,6 +10,8 @@ use bullet_lib::game::inputs::Chess768;
 use bullet_lib::game::outputs::MaterialCount;
 use bullet_lib::lr;
 use bullet_lib::lr::LrScheduler;
+use bullet_lib::nn::NetworkBuilderNode;
+use bullet_lib::nn::Shape;
 use bullet_lib::nn::optimiser;
 use bullet_lib::trainer::save::SavedFormat;
 use bullet_lib::value::ValueTrainer;
@@ -30,6 +32,7 @@ use viriformat::chess::board::Board;
 use viriformat::chess::chessmove::Move;
 use viriformat::dataformat::Filter;
 use viriformat::dataformat::WDL;
+use acyclib::graph::builder::GraphBuilderNode;
 
 macro_rules! init {
     (|$sq:ident, $size:literal | $($rest:tt)+) => {{
@@ -851,21 +854,6 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
     return ValueTrainerBuilder::default()
         .dual_perspective()
         .optimiser(optimiser::AdamW)
-        .loss_fn(|output, targets| {
-            let sigmoid = output.sigmoid();
-            let mse = sigmoid.squared_error(targets);
-
-            let diff = sigmoid - targets;
-            let sign = diff * (diff.abs_pow(1.0) + 0.000001).abs_pow(-1.0);
-            let is_greater = (1.0 + sign) / 2.0; // 1.0 if sigmoid > targets, 0.0 else
-
-            let dist_to_draw = (targets - 0.5).abs_pow(1.0);
-            let is_draw = (dist_to_draw * -2.0 + 1.0).crelu(); // 1.0 if targets == 0.5, 0.0 else
-
-            let factor = 1.0 + is_greater * 0.15 + is_greater * is_draw * 0.15;
-
-            mse * factor
-        })
         .inputs(inputs)
         .output_buckets(MaterialCount::<OUTPUT_BUCKETS>)
         .save_format(&[
@@ -878,12 +866,12 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
             SavedFormat::id("l3w"),
             SavedFormat::id("l3b"),
         ])
-        .build(|builder, stm, ntm, buckets| {
+        .build_custom(|builder, (stm, ntm, buckets), targets| {
             // Build layers
             let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
             let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
-            let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
+            let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS * 3);
 
             // Crelu + Pairwise
             let stm_subnet = l0.forward(stm).crelu().pairwise_mul();
@@ -892,12 +880,56 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
             // Dual activation
             let l1_out = l1.forward(pairwise_out).select(buckets);
             let l1_out = l1_out.concat(l1_out.abs_pow(2.0));
-            let l1_out = l1_out.relu();
+            let l1_out = l1_out.crelu();
             // L2 + L3 forward
             let l2_out = l2.forward(l1_out).select(buckets).screlu();
             let l3_out = l3.forward(l2_out.concat(l1_out)).select(buckets);
 
-            l3_out
+            let loss_mask = builder.new_constant(Shape::new(1, 3), &[1.0, 0.0, 0.0]);
+            let draw_mask = builder.new_constant(Shape::new(1, 3), &[0.0, 1.0, 0.0]);
+            let win_mask = builder.new_constant(Shape::new(1, 3), &[0.0, 0.0, 1.0]);
+
+            let loss = loss_mask.matmul(l3_out);
+            let draw = draw_mask.matmul(l3_out);
+            let win = win_mask.matmul(l3_out);
+
+            // Strange way to do a max() operation
+            fn maximum<'a>(x: GraphBuilderNode<'a, CudaMarker>, y: GraphBuilderNode<'a, CudaMarker>) -> GraphBuilderNode<'a, CudaMarker> {
+                (x - y).relu() + y
+            }
+            let max = maximum(loss, maximum(draw, win));
+
+            // Strange way to do an exp() operation
+            fn exp(x: GraphBuilderNode<'_, CudaMarker>) -> GraphBuilderNode<'_, CudaMarker> {
+                let sigmoid = x.sigmoid();
+                let inv_sigmoid = sigmoid.abs_pow(-1.0);
+                let e_minus_x = inv_sigmoid - 1.0;
+                e_minus_x.abs_pow(-1.0)
+            }
+            let loss = exp(loss - max);
+            let draw = exp(draw - max);
+            let win = exp(win - max);
+
+            let inv_sum = (win + draw + loss).abs_pow(-1.0);
+            let win = win * inv_sum;
+            let draw = draw * inv_sum;
+
+            let sigmoid = (draw * 0.5 + win).crelu(); // .clamp(0.0, 1.0)
+
+            // Pessimistic Loss
+            let mse = sigmoid.squared_error(targets);
+
+            let diff = sigmoid - targets;
+            let sign = diff * (diff.abs_pow(1.0) + 0.000001).abs_pow(-1.0);
+            let is_greater = (1.0 + sign) / 2.0; // 1.0 if sigmoid > targets, 0.0 else
+
+            let dist_to_draw = (targets - 0.5).abs_pow(1.0);
+            let is_draw = (dist_to_draw * -2.0 + 1.0).crelu(); // 1.0 if targets == 0.5, 0.0 else
+
+            let factor = 1.0 + is_greater * 0.15 + is_greater * is_draw * 0.15;
+            let loss = mse * factor;
+
+            (sigmoid, loss) // sigmoid technically isn't the correct output here, but it's not relevant for training
         });
 }
 
@@ -1174,7 +1206,7 @@ fn main() {
         "/mnt/e/Chess/Data/combined.vf",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0165r", superbatch: 400 },
-        Some(NetConfig { name: "0165", superbatch: 1000 }),
+        NetConfig { name: "0160r2", superbatch: 400 },
+        Some(NetConfig { name: "0160", superbatch: 1000 }),
     );
 }

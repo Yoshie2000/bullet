@@ -1,4 +1,5 @@
 use acyclib::trainer::optimiser::adam::AdamW;
+use acyclib::graph::builder::GraphBuilderNode;
 use bullet_cuda_backend::CudaDevice;
 use bullet_cuda_backend::CudaMarker;
 use bullet_lib::LocalSettings;
@@ -879,22 +880,24 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
             SavedFormat::id("l3b"),
         ])
         .build(|builder, stm, ntm, buckets| {
+            fn hardSwish6(x: GraphBuilderNode<'_, CudaMarker>) -> GraphBuilderNode<'_, CudaMarker> {
+                let relu6 = ((x + 3.0) / 6.0).crelu() * 6.0;
+                x * relu6 / 6.0
+            }
+
             // Build layers
             let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
             let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
-            let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
-            let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
+            let l2 = builder.new_affine("l2", L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
+            let l3 = builder.new_affine("l3", L3_SIZE + L2_SIZE, OUTPUT_BUCKETS);
 
             // Crelu + Pairwise
             let stm_subnet = l0.forward(stm).crelu().pairwise_mul();
             let ntm_subnet = l0.forward(ntm).crelu().pairwise_mul();
             let pairwise_out = stm_subnet.concat(ntm_subnet);
-            // Dual activation
-            let l1_out = l1.forward(pairwise_out).select(buckets);
-            let l1_out = l1_out.concat(l1_out.abs_pow(2.0));
-            let l1_out = l1_out.relu();
-            // L2 + L3 forward
-            let l2_out = l2.forward(l1_out).select(buckets).screlu();
+            // L1 - L3 forward
+            let l1_out = hardSwish6(l1.forward(pairwise_out).select(buckets));
+            let l2_out = hardSwish6(l2.forward(l1_out).select(buckets));
             let l3_out = l3.forward(l2_out.concat(l1_out)).select(buckets);
 
             l3_out
@@ -1174,7 +1177,7 @@ fn main() {
         "/mnt/e/Chess/Data/combined.vf",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0165r", superbatch: 400 },
-        Some(NetConfig { name: "0165", superbatch: 1000 }),
+        NetConfig { name: "0166r", superbatch: 400 },
+        Some(NetConfig { name: "0166", superbatch: 1000 }),
     );
 }

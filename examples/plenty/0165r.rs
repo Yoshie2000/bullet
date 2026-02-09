@@ -1,4 +1,5 @@
 use acyclib::trainer::optimiser::adam::AdamW;
+use acyclib::graph::builder::GraphBuilderNode;
 use bullet_cuda_backend::CudaDevice;
 use bullet_cuda_backend::CudaMarker;
 use bullet_lib::LocalSettings;
@@ -879,6 +880,11 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
             SavedFormat::id("l3b"),
         ])
         .build(|builder, stm, ntm, buckets| {
+            fn hardSwish6(x: GraphBuilderNode<'_, CudaMarker>) -> GraphBuilderNode<'_, CudaMarker> {
+                let relu6 = ((x + 3.0) / 6.0).crelu() * 6.0;
+                x * relu6 / 6.0
+            }
+
             // Build layers
             let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
             let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
@@ -892,9 +898,9 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
             // Dual activation
             let l1_out = l1.forward(pairwise_out).select(buckets);
             let l1_out = l1_out.concat(l1_out.abs_pow(2.0));
-            let l1_out = l1_out.relu();
+            let l1_out = hardSwish6(l1_out);
             // L2 + L3 forward
-            let l2_out = l2.forward(l1_out).select(buckets).screlu();
+            let l2_out = hardSwish6(l2.forward(l1_out).select(buckets));
             let l3_out = l3.forward(l2_out.concat(l1_out)).select(buckets);
 
             l3_out
@@ -1175,6 +1181,6 @@ fn main() {
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
         NetConfig { name: "0165r", superbatch: 400 },
-        Some(NetConfig { name: "0165", superbatch: 1000 }),
+        Some(NetConfig { name: "0164", superbatch: 1000 }),
     );
 }

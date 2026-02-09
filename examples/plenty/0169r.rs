@@ -1,4 +1,5 @@
 use acyclib::trainer::optimiser::adam::AdamW;
+use acyclib::graph::builder::GraphBuilderNode;
 use bullet_cuda_backend::CudaDevice;
 use bullet_cuda_backend::CudaMarker;
 use bullet_lib::LocalSettings;
@@ -10,6 +11,7 @@ use bullet_lib::game::inputs::Chess768;
 use bullet_lib::game::outputs::MaterialCount;
 use bullet_lib::lr;
 use bullet_lib::lr::LrScheduler;
+use bullet_lib::nn::Shape;
 use bullet_lib::nn::optimiser;
 use bullet_lib::trainer::save::SavedFormat;
 use bullet_lib::value::ValueTrainer;
@@ -851,21 +853,6 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
     return ValueTrainerBuilder::default()
         .dual_perspective()
         .optimiser(optimiser::AdamW)
-        .loss_fn(|output, targets| {
-            let sigmoid = output.sigmoid();
-            let mse = sigmoid.squared_error(targets);
-
-            let diff = sigmoid - targets;
-            let sign = diff * (diff.abs_pow(1.0) + 0.000001).abs_pow(-1.0);
-            let is_greater = (1.0 + sign) / 2.0; // 1.0 if sigmoid > targets, 0.0 else
-
-            let dist_to_draw = (targets - 0.5).abs_pow(1.0);
-            let is_draw = (dist_to_draw * -2.0 + 1.0).crelu(); // 1.0 if targets == 0.5, 0.0 else
-
-            let factor = 1.0 + is_greater * 0.15 + is_greater * is_draw * 0.15;
-
-            mse * factor
-        })
         .inputs(inputs)
         .output_buckets(MaterialCount::<OUTPUT_BUCKETS>)
         .save_format(&[
@@ -878,7 +865,7 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
             SavedFormat::id("l3w"),
             SavedFormat::id("l3b"),
         ])
-        .build(|builder, stm, ntm, buckets| {
+        .build_custom(|builder, (stm, ntm, buckets), targets| {
             // Build layers
             let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
             let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
@@ -889,15 +876,33 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
             let stm_subnet = l0.forward(stm).crelu().pairwise_mul();
             let ntm_subnet = l0.forward(ntm).crelu().pairwise_mul();
             let pairwise_out = stm_subnet.concat(ntm_subnet);
+
+            let ones_l1_vec = builder.new_constant(Shape::new(1, L1_SIZE), &[1.0 / L1_SIZE as f32; L1_SIZE]);
+            let l0_out_norm = ones_l1_vec.matmul(pairwise_out);
+
             // Dual activation
             let l1_out = l1.forward(pairwise_out).select(buckets);
             let l1_out = l1_out.concat(l1_out.abs_pow(2.0));
-            let l1_out = l1_out.relu();
+            let l1_out = l1_out.crelu();
             // L2 + L3 forward
             let l2_out = l2.forward(l1_out).select(buckets).screlu();
             let l3_out = l3.forward(l2_out.concat(l1_out)).select(buckets);
 
-            l3_out
+            // Loss calculation
+            let sigmoid = l3_out.sigmoid();
+            let mse = sigmoid.squared_error(targets);
+
+            let diff = sigmoid - targets;
+            let sign = diff * (diff.abs_pow(1.0) + 0.000001).abs_pow(-1.0);
+            let is_greater = (1.0 + sign) / 2.0; // 1.0 if sigmoid > targets, 0.0 else
+
+            let dist_to_draw = (targets - 0.5).abs_pow(1.0);
+            let is_draw = (dist_to_draw * -2.0 + 1.0).crelu(); // 1.0 if targets == 0.5, 0.0 else
+
+            let factor = 1.0 + is_greater * 0.15 + is_greater * is_draw * 0.15;
+            let loss = mse * factor + 0.005 * l0_out_norm;
+
+            (l3_out, loss)
         });
 }
 
@@ -1174,7 +1179,7 @@ fn main() {
         "/mnt/e/Chess/Data/combined.vf",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0165r", superbatch: 400 },
-        Some(NetConfig { name: "0165", superbatch: 1000 }),
+        NetConfig { name: "0169r", superbatch: 400 },
+        Some(NetConfig { name: "0169", superbatch: 1000 }),
     );
 }

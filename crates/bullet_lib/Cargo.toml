@@ -411,6 +411,10 @@ name = "0134-2r26"
 path = "../../examples/plenty/0134-2r26.rs"
 
 [[example]]
+name = "0134-2r27"
+path = "../../examples/plenty/0134-2r27.rs"
+
+[[example]]
 name = "0135"
 path = "../../examples/plenty/0135.rs"
 
@@ -519,6 +523,10 @@ name = "0160"
 path = "../../examples/plenty/0160.rs"
 
 [[example]]
+name = "0160r2"
+path = "../../examples/plenty/0160r2.rs"
+
+[[example]]
 name = "0160rr"
 path = "../../examples/plenty/0160rr.rs"
 
@@ -569,6 +577,78 @@ path = "../../examples/plenty/0164.rs"
 [[example]]
 name = "0164r"
 path = "../../examples/plenty/0164r.rs"
+
+[[example]]
+name = "0165"
+path = "../../examples/plenty/0165.rs"
+
+[[example]]
+name = "0165r"
+path = "../../examples/plenty/0165r.rs"
+
+[[example]]
+name = "0165r2"
+path = "../../examples/plenty/0165r2.rs"
+
+[[example]]
+name = "0166"
+path = "../../examples/plenty/0166.rs"
+
+[[example]]
+name = "0166r"
+path = "../../examples/plenty/0166r.rs"
+
+[[example]]
+name = "0166r2"
+path = "../../examples/plenty/0166r2.rs"
+
+[[example]]
+name = "0167"
+path = "../../examples/plenty/0167.rs"
+
+[[example]]
+name = "0167r"
+path = "../../examples/plenty/0167r.rs"
+
+[[example]]
+name = "0167r2"
+path = "../../examples/plenty/0167r2.rs"
+
+[[example]]
+name = "0168"
+path = "../../examples/plenty/0168.rs"
+
+[[example]]
+name = "0168r"
+path = "../../examples/plenty/0168r.rs"
+
+[[example]]
+name = "0169"
+path = "../../examples/plenty/0169.rs"
+
+[[example]]
+name = "0169r"
+path = "../../examples/plenty/0169r.rs"
+
+[[example]]
+name = "0169r2"
+path = "../../examples/plenty/0169r2.rs"
+
+[[example]]
+name = "0170"
+path = "../../examples/plenty/0170.rs"
+
+[[example]]
+name = "0170r"
+path = "../../examples/plenty/0170r.rs"
+
+[[example]]
+name = "0171"
+path = "../../examples/plenty/0171.rs"
+
+[[example]]
+name = "0171r"
+path = "../../examples/plenty/0171r.rs"
 
 [[example]]
 name = "relabel-0098"

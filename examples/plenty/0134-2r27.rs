@@ -1,6 +1,5 @@
 use acyclib::trainer::optimiser::adam::AdamW;
 use bullet_cuda_backend::CudaDevice;
-use bullet_cuda_backend::CudaMarker;
 use bullet_lib::LocalSettings;
 use bullet_lib::TrainingSchedule;
 use bullet_lib::TrainingSteps;
@@ -892,7 +891,7 @@ fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored
             // Dual activation
             let l1_out = l1.forward(pairwise_out).select(buckets);
             let l1_out = l1_out.concat(l1_out.abs_pow(2.0));
-            let l1_out = l1_out.relu();
+            let l1_out = l1_out.crelu();
             // L2 + L3 forward
             let l2_out = l2.forward(l1_out).select(buckets).screlu();
             let l3_out = l3.forward(l2_out.concat(l1_out)).select(buckets);
@@ -1150,13 +1149,24 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
         save_rate: 100,
     };
 
-    trainer.optimiser.set_params(optimiser::AdamWParams {
+    let quantised_params = optimiser::AdamWParams {
         decay: 0.01,
         beta1: 0.9,
         beta2: 0.999,
         min_weight: -0.99,
         max_weight: 0.99,
-    });
+    };
+    trainer.optimiser.set_params(quantised_params);
+
+    let float_params = optimiser::AdamWParams {
+        min_weight: -9.99,
+        max_weight: 9.99,
+        ..quantised_params
+    };
+    trainer.optimiser.set_params_for_weight("l2w", float_params);
+    trainer.optimiser.set_params_for_weight("l2b", float_params);
+    trainer.optimiser.set_params_for_weight("l3w", float_params);
+    trainer.optimiser.set_params_for_weight("l3b", float_params);
 
     let settings = make_settings(net.name);
     let data_loader = ViriBinpackLoader::new(
@@ -1174,7 +1184,7 @@ fn main() {
         "/mnt/e/Chess/Data/combined.vf",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0165r", superbatch: 400 },
-        Some(NetConfig { name: "0165", superbatch: 1000 }),
+        NetConfig { name: "0134-2r27", superbatch: 400 },
+        Some(NetConfig { name: "0134-2", superbatch: 1000 }),
     );
 }
