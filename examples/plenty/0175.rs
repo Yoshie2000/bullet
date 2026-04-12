@@ -1,5 +1,4 @@
-use acyclib::trainer::optimiser::adam::AdamW;
-use bullet_cuda_backend::CudaDevice;
+use bullet_gpu::runtime::cuda::Cuda;
 use bullet_lib::LocalSettings;
 use bullet_lib::TrainingSchedule;
 use bullet_lib::TrainingSteps;
@@ -17,6 +16,7 @@ use bullet_lib::value::loader::ViriBinpackLoader;
 use bullet_lib::value::loader::viribinpack::ViriFilter;
 use bullet_lib::wdl;
 use bullet_lib::wdl::WdlScheduler;
+use bullet_trainer::optimiser::adam::AdamW;
 use rand::{Rng, rng};
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicU64;
@@ -824,7 +824,7 @@ struct NetConfig<'a> {
 
 const TRAINING_DIR: &str = "/mnt/d/Chess Data/Selfgen/Training";
 
-fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored, MaterialCount<8>> {
+fn make_trainer() -> ValueTrainer<AdamW<Cuda>, ThreatInputsBucketsMirrored, MaterialCount<8>> {
     #[rustfmt::skip]
     let inputs = ThreatInputsBucketsMirrored::new([
             00, 01, 02, 03,
