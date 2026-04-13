@@ -16,6 +16,9 @@ use bullet_lib::value::loader::viribinpack::ViriFilter;
 use bullet_lib::wdl;
 use bullet_lib::wdl::WdlScheduler;
 use rand::{Rng, rng};
+use viriformat::chess::board::movegen;
+use viriformat::chess::piece::PieceType;
+use viriformat::chess::squareset::SquareSet;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -846,7 +849,21 @@ fn make_trainer() -> ValueTrainer<AdamW<Cuda>, ThreatInputsBucketsMirrored, Mate
     return ValueTrainerBuilder::default()
         .dual_perspective()
         .optimiser(optimiser::AdamW)
-        .loss_fn(|output, targets| output.sigmoid().squared_error(targets))
+        .loss_fn(|output, targets| {
+            let sigmoid = output.sigmoid();
+            let mse = sigmoid.squared_error(targets);
+
+            let diff = sigmoid - targets;
+            let sign = diff * (diff.abs_pow(1.0) + 0.000001).abs_pow(-1.0);
+            let is_greater = (1.0 + sign) / 2.0; // 1.0 if sigmoid > targets, 0.0 else
+
+            let dist_to_draw = (targets - 0.5).abs_pow(1.0);
+            let is_draw = (dist_to_draw * -2.0 + 1.0).crelu(); // 1.0 if targets == 0.5, 0.0 else
+
+            let factor = 1.0 + is_greater * 0.15 + is_greater * is_draw * 0.15;
+
+            mse * factor
+        })
         .inputs(inputs)
         .output_buckets(MaterialCount::<OUTPUT_BUCKETS>)
         .save_format(&[
@@ -870,10 +887,12 @@ fn make_trainer() -> ValueTrainer<AdamW<Cuda>, ThreatInputsBucketsMirrored, Mate
             let stm_subnet = l0.forward(stm).crelu().pairwise_mul();
             let ntm_subnet = l0.forward(ntm).crelu().pairwise_mul();
             let pairwise_out = stm_subnet.concat(ntm_subnet);
+
             // Dual activation
             let l1_out = l1.forward(pairwise_out).select(buckets);
             let l1_out = l1_out.concat(l1_out.abs_pow(2.0));
             let l1_out = l1_out.crelu();
+            
             // L2 + L3 forward
             let l2_out = l2.forward(l1_out).select(buckets).screlu();
             let l3_out = l3.forward(l2_out.concat(l1_out)).select(buckets);
@@ -928,12 +947,125 @@ fn piece_count_acceptance(board: &Board) -> f64 {
     acceptance.clamp(0., 1.)
 }
 
+const SEE_PIECE_VALUES: [i32; 6] = [100, 300, 300, 500, 900, 0]; // P, N, B, R, Q, K
+
+pub fn estimated_see(board: &Board, m: Move) -> i32 {
+    // initially take the value of the thing on the target square
+    let mut value = board.piece_array[m.to()].map_or(0, |p| SEE_PIECE_VALUES[p.piece_type()]);
+
+    if let Some(promo) = m.promotion_type() {
+        // if it's a promo, swap a pawn for the promoted piece type
+        value += SEE_PIECE_VALUES[promo] - SEE_PIECE_VALUES[0];
+    } else if m.is_ep() {
+        // for e.p. we will miss a pawn because the target square is empty
+        value = SEE_PIECE_VALUES[0];
+    }
+
+    value
+}
+
+/// Modified from viridithas, since the Board type is very similar
+pub fn static_exchange_eval(board: &Board, m: Move, threshold: i32) -> bool {
+    let from = m.from();
+    let to = m.to();
+    let bbs = &board.pieces;
+
+    let mut next_victim = m
+        .promotion_type()
+        .unwrap_or_else(|| board.piece_array[from].unwrap().piece_type());
+
+    let mut balance = estimated_see(board, m) - threshold;
+
+    // if the best case fails, don't bother doing the full search.
+    if balance < 0 {
+        return false;
+    }
+
+    // worst case is losing the piece
+    balance -= SEE_PIECE_VALUES[next_victim];
+
+    // if the worst case passes, we can return true immediately.
+    if balance >= 0 {
+        return true;
+    }
+
+    let diag_sliders = bbs.pieces[PieceType::Bishop] | bbs.pieces[PieceType::Queen];
+    let orth_sliders = bbs.pieces[PieceType::Rook] | bbs.pieces[PieceType::Queen];
+
+    // occupied starts with the position after the move `m` is made.
+    let mut occupied = (bbs.occupied() ^ from.as_set()) | to.as_set();
+    if m.is_ep() {
+        occupied ^= board.ep_sq().unwrap().as_set();
+    }
+
+    // after the move, it's the opponent's turn.
+    let mut colour = board.turn().flip();
+
+    let mut attackers = bbs.all_attackers_to_sq(to, occupied);
+
+    loop {
+        let my_attackers = attackers & bbs.colours[colour];
+        if my_attackers == SquareSet::EMPTY {
+            break;
+        }
+
+        // find cheapest attacker
+        for victim in PieceType::all() {
+            next_victim = victim;
+            if (my_attackers & bbs.pieces[victim]) != SquareSet::EMPTY {
+                break;
+            }
+        }
+
+        fn isolate_lsb(s: SquareSet) -> SquareSet {
+            s & SquareSet::from_inner(s.inner().wrapping_neg())
+        }
+
+        occupied ^= isolate_lsb(my_attackers & bbs.pieces[next_victim]);
+
+        // diagonal moves reveal bishops and queens:
+        if next_victim == PieceType::Pawn
+            || next_victim == PieceType::Bishop
+            || next_victim == PieceType::Queen
+        {
+            attackers |= movegen::bishop_attacks(to, occupied) & diag_sliders;
+        }
+
+        // orthogonal moves reveal rooks and queens:
+        if next_victim == PieceType::Rook || next_victim == PieceType::Queen {
+            attackers |= movegen::rook_attacks(to, occupied) & orth_sliders;
+        }
+
+        attackers &= occupied;
+
+        colour = colour.flip();
+
+        balance = -balance - 1 - SEE_PIECE_VALUES[next_victim];
+
+        if balance >= 0 {
+            // from Ethereal:
+            // As a slight optimisation for move legality checking, if our last attacking
+            // piece is a king, and our opponent still has attackers, then we've
+            // lost as the move we followed would be illegal
+            if next_victim == PieceType::King
+                && (attackers & bbs.colours[colour]) != SquareSet::EMPTY
+            {
+                colour = colour.flip();
+            }
+            break;
+        }
+    }
+
+    // the side that is to move after loop exit is the loser.
+    board.turn() != colour
+}
+
 fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
     let default_viri_filter = Filter {
         min_ply: 8,
         min_pieces: 0,
         max_eval: 32000,
-        filter_tactical: true,
+        filter_tactical: false,
         filter_check: true,
         filter_castling: false,
         max_eval_incorrectness: u32::MAX,
@@ -955,7 +1087,14 @@ fn filter(board: &Board, mv: Move, eval: i16, wdl: f32) -> bool {
         _ => unreachable!(),
     };
 
-    !default_viri_filter.should_filter(mv, eval as i32, board, wdl, &mut rng)
+    fn custom_should_filter(board: &Board, mv: Move) -> bool {
+        if board.is_tactical(mv) && static_exchange_eval(board, mv, 0) {
+            return true;
+        }
+        return false;
+    }
+
+    !default_viri_filter.should_filter(mv, eval as i32, board, wdl, &mut rng) && !custom_should_filter(board, mv)
         && rng.random_bool(piece_count_acceptance(board))
 }
 
@@ -1001,8 +1140,8 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
         net_id: format!("net-{}", net.name).to_string(),
         eval_scale: 450.0,
         steps: TrainingSteps {
-            batch_size: 16_384,
-            batches_per_superbatch: 6104,
+            batch_size: 16_384 * 2,
+            batches_per_superbatch: 6104 / 2,
             start_superbatch: start_superbatch,
             end_superbatch: net.superbatch,
         },
@@ -1030,21 +1169,12 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
 }
 
 fn main() {
-    // Step 1
-    train(
-        "/mnt/e/Chess/Data/combined.vf",
-        wdl::LinearWDL { start: 0.15, end: 0.6 },
-        lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 1000 },
-        NetConfig { name: "0134-3", superbatch: 1000 },
-        None,
-    );
-
     // Step 2
     train(
         "/mnt/e/Chess/Data/combined.vf",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
-        NetConfig { name: "0134-3r", superbatch: 400 },
-        Some(NetConfig { name: "0134-3", superbatch: 1000 }),
+        NetConfig { name: "0134-2r24", superbatch: 400 },
+        Some(NetConfig { name: "0134-2", superbatch: 1000 }),
     );
 }
