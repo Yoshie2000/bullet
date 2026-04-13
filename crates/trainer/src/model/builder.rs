@@ -12,11 +12,11 @@ use bullet_compiler::{
     tensor::{
         DType, DValue, IRBuilder, Size, TNode, TType, TValue,
         operation::{
-            BroadcastAcrossDimension, CABinary, CABinaryOp, Matmul, MatrixLayout, PadAcrossDimension,
-            ReduceAcrossDimension, Reduction, Select, SliceAcrossDimension, SparseMatmul, Unary, UnaryOp,
+            BroadcastAcrossDimension, CABinary, CABinaryOp, Matmul, MatrixLayout, PadAcrossDimension, PassThrough,
+            Power, ReduceAcrossDimension, Reduction, Select, SliceAcrossDimension, SparseMatmul, Unary, UnaryOp,
             autograd::{
                 Autograd, AutogradOp, CReLU, DiffableFromOutput, DiffableFromOutputOp, FauxQuantise, ReLU, SCReLU,
-                Sigmoid,
+                Sigmoid, SoftmaxCrossEntropyLoss,
             },
         },
         transform::{
@@ -162,7 +162,7 @@ impl ModelBuilder {
         assert_eq!(loss.nt.shape, Shape::new(1, 1));
 
         if loss.nt.batched {
-            loss = loss.reduce_sum_across_batch();
+            loss = loss.reduce_sum_batch();
         }
 
         let mut fwd = self.ir.build([output.detach()]);
@@ -307,13 +307,34 @@ impl<'a> ModelNode<'a> {
         Self { node, nt: NodeType { batched: true, ..self.nt }, ..self }
     }
 
+    #[deprecated(note = "Use `reduce_sum_batch` instead!")]
     pub fn reduce_sum_across_batch(self) -> Self {
+        self.reduce_sum_batch()
+    }
+
+    pub fn reduce_sum_batch(self) -> Self {
         assert!(self.nt.batched);
         let dtype = self.ty().dtype();
         let shape = [Size::variable(), self.nt.shape.size().into()];
         let op = ReduceAcrossDimension::new(dtype, shape, 0, Reduction::Sum);
         let node = self.builder.add_op([self], op.unwrap())[0];
         Self { node, nt: NodeType { batched: false, ..self.nt }, ..self }
+    }
+
+    pub fn reduce_sum_rows(self) -> Self {
+        let dtype = self.ty().dtype();
+        let cols = self.nt.shape.cols;
+        let op = ReduceAcrossDimension::new(dtype, self.nt, 1 + usize::from(self.is_batched()), Reduction::Sum);
+        let node = self.builder.add_op([self], op.unwrap())[0];
+        Self { node, nt: NodeType { shape: Shape { rows: 1, cols }, ..self.nt }, ..self }
+    }
+
+    pub fn reduce_sum_cols(self) -> Self {
+        let dtype = self.ty().dtype();
+        let rows = self.nt.shape.rows;
+        let op = ReduceAcrossDimension::new(dtype, self.nt, usize::from(self.is_batched()), Reduction::Sum);
+        let node = self.builder.add_op([self], op.unwrap())[0];
+        Self { node, nt: NodeType { shape: Shape { rows, cols: 1 }, ..self.nt }, ..self }
     }
 
     fn broadcast_scalar(self, shape: Shape) -> Self {
@@ -330,7 +351,7 @@ impl<'a> ModelNode<'a> {
         Self { node, ..self }
     }
 
-    pub fn binary(mut self, mut rhs: Self, binary: CABinary) -> Self {
+    fn broadcast_to_same(mut self, mut rhs: Self) -> (Self, Self) {
         if self.nt.shape.size() != rhs.nt.shape.size() {
             if self.nt.shape == Shape::new(1, 1) && !self.nt.batched {
                 self = self.broadcast_scalar(rhs.nt.shape);
@@ -346,6 +367,12 @@ impl<'a> ModelNode<'a> {
             (true, false) => rhs = rhs.broadcast_across_batch(),
             _ => {}
         }
+
+        (self, rhs)
+    }
+
+    pub fn binary(mut self, mut rhs: Self, binary: CABinary) -> Self {
+        (self, rhs) = self.broadcast_to_same(rhs);
 
         let op = CABinaryOp::new(self.ty(), binary);
         let node = self.builder.add_op([self, rhs], op)[0];
@@ -439,8 +466,11 @@ impl<'a> ModelNode<'a> {
         self.unary(Unary::Abs)
     }
 
-    pub fn abs_pow(self, power: f32) -> Self {
-        (power * self.abs().unary(Unary::Log)).exp()
+    pub fn abs_pow(mut self, power: f32) -> Self {
+        let mut power = self.builder.scalar(power);
+        (self, power) = self.broadcast_to_same(power);
+        let node = self.builder.add_op([self, power], Power(self.ty().size()))[0];
+        Self { node, ..self }
     }
 
     pub fn squared_error(self, other: Self) -> Self {
@@ -452,6 +482,30 @@ impl<'a> ModelNode<'a> {
         let op = FauxQuantise(self.ty(), value.into(), round);
         let node = self.builder.add_op([self], op)[0];
         Self { node, ..self }
+    }
+
+    pub fn softmax_crossentropy_loss(self, targets: Self) -> Self {
+        assert_eq!(self.is_batched(), targets.is_batched());
+
+        let op = SoftmaxCrossEntropyLoss {
+            batch_size: if self.is_batched() { Size::variable() } else { 1.into() },
+            axis_size: self.shape().size(),
+        };
+        let node = self.builder.add_op([self, targets], op)[0];
+        Self { node, ..self }
+    }
+
+    pub fn clip_pass_through_grad(self, min: f32, max: f32) -> Self {
+        let op = PassThrough(
+            self.ty(),
+            Box::new(move |x| {
+                let size = x.ty().size();
+                let min = x.builder().scalar(min, size);
+                let max = x.builder().scalar(max, size);
+                x.max(min)?.min(max)
+            }),
+        );
+        Self { node: self.builder.add_op([self], op)[0], ..self }
     }
 
     pub fn pad(self, before: usize, after: usize, value: f32) -> Self {

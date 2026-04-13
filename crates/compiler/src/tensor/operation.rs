@@ -20,8 +20,9 @@ pub use linear::{
     sparse::{SparseMatmul, SparseMatmulBwd, SparseMatmulBwdMulti},
 };
 pub use pointwise::{
-    binary::{CABinary, CABinaryOp},
+    binary::{CABinary, CABinaryOp, Power},
     copy::CopyOp,
+    passthrough::PassThrough,
     unary::{Unary, UnaryOp},
 };
 pub use subgraph::SubGraph;
