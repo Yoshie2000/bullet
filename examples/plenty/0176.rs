@@ -862,14 +862,15 @@ fn make_trainer() -> ValueTrainer<AdamW<Cuda>, ThreatInputsBucketsMirrored, Mate
         .build(|builder, stm, ntm, buckets| {
             // Build layers
             let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
-            let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
+            let l1 = builder.new_affine("l1", 2 * L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
 
             // Crelu + Pairwise
-            let stm_subnet = l0.forward(stm).crelu().pairwise_mul();
-            let ntm_subnet = l0.forward(ntm).crelu().pairwise_mul();
-            let pairwise_out = stm_subnet.concat(ntm_subnet);
+            let stm_subnet = l0.forward(stm).crelu(); //.pairwise_mul();
+            let ntm_subnet = l0.forward(ntm).crelu(); //.pairwise_mul();
+            let pairwise_out = stm_subnet.pairwise_mul().concat(ntm_subnet.pairwise_mul());
+            let pairwise_out = pairwise_out.concat(stm_subnet.concat(ntm_subnet).pairwise_mul());
 
             // Dual activation
             let l1_out = l1.forward(pairwise_out).select(buckets);
