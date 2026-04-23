@@ -1,5 +1,4 @@
-use acyclib::trainer::optimiser::adam::AdamW;
-use bullet_cuda_backend::CudaDevice;
+use bullet_gpu::runtime::cuda::Cuda;
 use bullet_lib::LocalSettings;
 use bullet_lib::TrainingSchedule;
 use bullet_lib::TrainingSteps;
@@ -17,9 +16,9 @@ use bullet_lib::value::loader::ViriBinpackLoader;
 use bullet_lib::value::loader::viribinpack::ViriFilter;
 use bullet_lib::wdl;
 use bullet_lib::wdl::WdlScheduler;
+use bullet_trainer::optimiser::adam::AdamW;
 use rand::{Rng, rng};
 use viriformat::chess::board::movegen;
-use viriformat::chess::piece::Colour;
 use viriformat::chess::piece::PieceType;
 use viriformat::chess::squareset::SquareSet;
 use std::mem::MaybeUninit;
@@ -828,7 +827,7 @@ struct NetConfig<'a> {
 
 const TRAINING_DIR: &str = "/mnt/d/Chess Data/Selfgen/Training";
 
-fn make_trainer() -> ValueTrainer<AdamW<CudaDevice>, ThreatInputsBucketsMirrored, MaterialCount<8>> {
+fn make_trainer() -> ValueTrainer<AdamW<Cuda>, ThreatInputsBucketsMirrored, MaterialCount<8>> {
     #[rustfmt::skip]
     let inputs = ThreatInputsBucketsMirrored::new([
             00, 01, 02, 03,
@@ -1170,10 +1169,10 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
 fn main() {
     // Step 2
     train(
-        "/mnt/e/Chess/Data/combined-0172r.vf",
+        "/mnt/e/Chess/Data/combined.vf",
         wdl::ConstantWDL { value: 1.0 },
         lr::CosineDecayLR { initial_lr: 0.000025, final_lr: 0.000025 * 0.3 * 0.3 * 0.3, final_superbatch: 400 },
         NetConfig { name: "0175r", superbatch: 400 },
-        Some(NetConfig { name: "0175", superbatch: 1000 }),
+        None, //Some(NetConfig { name: "0175", superbatch: 1000 }),
     );
 }
