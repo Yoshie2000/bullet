@@ -871,7 +871,7 @@ fn make_trainer() -> ValueTrainer<AdamW<Cuda>, ThreatInputsBucketsMirrored, Mate
     const KING_BUCKETS: usize = 12;
     const OUTPUT_BUCKETS: usize = 8;
     const L1_SIZE: usize = 640;
-    const L2_SIZE: usize = 16;
+    const L2_SIZE: usize = 32;
     const L3_SIZE: usize = 32;
 
     #[rustfmt::skip]
@@ -896,7 +896,9 @@ fn make_trainer() -> ValueTrainer<AdamW<Cuda>, ThreatInputsBucketsMirrored, Mate
             let l0 = builder.new_affine("l0", 768 + TOTAL_THREATS + 768 * KING_BUCKETS, L1_SIZE);
             let l1 = builder.new_affine("l1", L1_SIZE, OUTPUT_BUCKETS * L2_SIZE);
             let l2 = builder.new_affine("l2", 2 * L2_SIZE, OUTPUT_BUCKETS * L3_SIZE);
-            let l3 = builder.new_affine("l3", L3_SIZE + 2 * L2_SIZE, OUTPUT_BUCKETS);
+            let l3 = builder.new_affine("l3", L3_SIZE, OUTPUT_BUCKETS);
+
+            assert_eq!(L2_SIZE, L3_SIZE);
 
             // Crelu + Pairwise
             let stm_subnet = l0.forward(stm).crelu().pairwise_mul();
@@ -908,7 +910,7 @@ fn make_trainer() -> ValueTrainer<AdamW<Cuda>, ThreatInputsBucketsMirrored, Mate
             let l1_out = l1_out.crelu();
             // L2 + L3 forward
             let l2_out = l2.forward(l1_out).select(buckets).screlu();
-            let l3_out = l3.forward(l2_out.concat(l1_out)).select(buckets);
+            let l3_out = l3.forward(l2_out + l1_out.slice_rows(0, L3_SIZE)).select(buckets);
 
             l3_out
         });
@@ -1052,7 +1054,7 @@ fn train<WDL: WdlScheduler, LR: LrScheduler>(
     });
 
     let settings = make_settings(net.name);
-    let data_loader = ViriBinpackLoader::new(data_path, 8192, 12, ViriFilter::Custom(filter));
+    let data_loader = ViriBinpackLoader::new(data_path, 8192, 4, ViriFilter::Custom(filter));
     trainer.run(&schedule, &settings, &data_loader);
 }
 
@@ -1063,7 +1065,7 @@ fn main() {
         "/mnt/e/Chess/Data/combined.vf",
         wdl::LinearWDL { start: 0.15, end: 0.6 },
         lr::CosineDecayLR { initial_lr: 0.001, final_lr: 0.001 * 0.3 * 0.3 * 0.3, final_superbatch: 1000 },
-        NetConfig { name: "0176", superbatch: 1000 },
+        NetConfig { name: "0177", superbatch: 1000 },
         None,
     );
 }
